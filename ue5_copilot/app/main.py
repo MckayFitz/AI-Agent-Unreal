@@ -73,7 +73,16 @@ def scan_project_endpoint(request: ScanRequest):
     return {
         "message": "Project scanned successfully.",
         "project_path": result["project_path"],
-        "file_count": result["file_count"]
+        "file_count": result["file_count"],
+        "loaded_count": result["loaded_count"],
+        "total_files_seen": result["total_files_seen"],
+        "skipped_generated_count": result["skipped_generated_count"],
+        "skipped_binary_count": result["skipped_binary_count"],
+        "skipped_unknown_count": result["skipped_unknown_count"],
+        "skipped_large_count": result["skipped_large_count"],
+        "unreadable_count": result["unreadable_count"],
+        "loaded_files": result["loaded_files"],
+        "top_extensions": result["top_extensions"],
     }
 
 
