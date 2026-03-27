@@ -192,26 +192,45 @@ Computer Science / Software Development
 ## ⭐ Notes
 
 This project is under active development and will continue improving with new AI-assisted features. 
+
 Future Improvements Under work:
 
 Find Usage / References
+
 Locate where classes, functions, or variables are used
+
 Explain Selected File
+
 Click a file → get full breakdown
+
 Project Architecture Mapping
+
 Visualize systems, modules, and dependencies
+
 Auto Code Suggestions
+
 Suggest improvements or missing log
+
 Blueprint Awareness (Phase 1)
+
 Detect Blueprint assets
+
 Infer roles (Character, Weapon, UI, etc.)
+
 Blueprint Node Explainer
+
 Paste copied nodes → get explanation + flow
+
 C++ ↔ Blueprint Linking
+
 Show which Blueprints inherit from C++ classes
+
 UE5 Editor Plugin
+
 Dockable AI assistant inside Unreal
+
 Current Selection Awareness
+
 Detect selected actor, Blueprint, or file
 One-Click Analysis
 Right-click → “Explain this”
