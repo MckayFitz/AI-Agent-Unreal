@@ -3,108 +3,95 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Unreal Assistant</title>
+    <title>UE5 AI Copilot</title>
     <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+    <div class="bg-grid"></div>
+
     <main class="app-shell">
+
         <header class="topbar">
             <div>
-                <p class="kicker">LOCAL PROJECT TOOL</p>
-                <h1>Unreal Assistant</h1>
+                <p class="kicker">AI SYSTEM ONLINE</p>
+                <h1>UE5 AI Copilot</h1>
                 <p class="subtitle">
-                    Scan your project, ask code questions, and analyze Unreal build errors in one place.
+                    Scan your Unreal project, analyze systems, debug errors, and navigate code like a hacker.
                 </p>
             </div>
             <div class="status-wrap">
-                <span id="apiStatus" class="status-pill">Checking API</span>
+                <span id="apiStatus" class="status-pill">Connecting...</span>
             </div>
         </header>
 
         <section class="layout">
-            <aside class="left-column">
-                <div class="panel">
-                    <div class="panel-header">
-                        <h2>Project Scan</h2>
-                    </div>
 
-                    <label for="projectPath">UE5 project folder</label>
+            <!-- LEFT PANEL -->
+            <aside class="left-column">
+
+                <div class="panel glow">
+                    <h2>📁 Project Scanner</h2>
+
                     <input
                         id="projectPath"
                         type="text"
-                        placeholder="C:\Users\YourName\Documents\Unreal Projects\MyGame"
+                        placeholder="C:\UnrealProjects\MyGame"
                     />
 
-                    <div class="button-row">
-                        <button id="scanButton">Scan Project</button>
-                    </div>
-
-                    <p id="scanStatus" class="helper-text">No project scanned yet.</p>
+                    <button id="scanButton">SCAN PROJECT</button>
+                    <p id="scanStatus" class="helper-text">Waiting for input...</p>
                 </div>
 
-                <div class="panel">
-                    <div class="panel-header">
-                        <h2>Ask About Code</h2>
-                    </div>
+                <div class="panel glow">
+                    <h2>💬 Ask AI</h2>
 
-                    <label for="questionInput">Question</label>
                     <textarea
                         id="questionInput"
-                        rows="6"
-                        placeholder="Where is movement handled?"
+                        placeholder="Where is player movement handled?"
                     ></textarea>
 
-                    <div class="button-row">
-                        <button id="askButton">Ask</button>
-                    </div>
+                    <button id="askButton">ASK</button>
                 </div>
 
-                <div class="panel">
-                    <div class="panel-header">
-                        <h2>Error Analyzer</h2>
-                    </div>
+                <div class="panel glow">
+                    <h2>⚠️ Error Analyzer</h2>
 
-                    <label for="errorText">Paste Unreal or Visual Studio error</label>
                     <textarea
                         id="errorText"
-                        rows="8"
-                        placeholder="Paste build or compile errors here"
+                        placeholder="Paste Unreal or Visual Studio error..."
                     ></textarea>
 
-                    <div class="button-row">
-                        <button onclick="analyzeError()">Analyze Error</button>
-                    </div>
+                    <button onclick="analyzeError()">ANALYZE</button>
                 </div>
+
             </aside>
 
+            <!-- RIGHT PANEL -->
             <section class="right-column">
-                <div class="panel output-panel">
-                    <div class="panel-header">
-                        <h2>Answer</h2>
-                    </div>
-                    <div id="answerOutput" class="output-box muted-output">
-                        Scan a project, then ask a question about your codebase.
+
+                <div class="panel output-panel glow">
+                    <h2>🧠 AI Response</h2>
+                    <div id="answerOutput" class="terminal">
+                        System ready. Awaiting input...
                     </div>
                 </div>
 
-                <div class="panel output-panel">
-                    <div class="panel-header">
-                        <h2>Error Analysis</h2>
-                    </div>
-                    <div id="errorAnalysisBox" class="output-box muted-output">
-                        Paste an Unreal or Visual Studio error to get a breakdown and likely fix.
+                <div class="panel output-panel glow">
+                    <h2>🛠️ Error Breakdown</h2>
+                    <div id="errorAnalysisBox" class="terminal">
+                        Paste an error to begin analysis...
                     </div>
                 </div>
 
-                <div class="panel output-panel">
-                    <div class="panel-header">
-                        <h2>Retrieved Context</h2>
-                    </div>
-                    <div id="matchesOutput" class="output-box muted-output">
-                        Matching files and snippets will appear here after you ask a question.
+                <div class="panel output-panel glow">
+                    <h2>📄 Context / Matches</h2>
+                    <div id="matchesOutput" class="terminal">
+                        Relevant files will appear here...
                     </div>
                 </div>
+
             </section>
+
         </section>
     </main>
 
