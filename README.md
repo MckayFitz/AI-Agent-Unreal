@@ -1,4 +1,4 @@
-# UE5 AI Copilot
+# UE5 AI Agent
 
 An AI-powered assistant designed to help Unreal Engine 5 developers understand their projects, debug errors, and navigate complex C++ codebases.
 
