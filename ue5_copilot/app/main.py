@@ -473,6 +473,8 @@ def selection_analysis(request: SelectionRequest):
             blueprint_links=analysis["blueprint_links"],
             family_summaries=summaries,
         )
+        asset_detail["selection"] = selection
+        asset_detail["selection_type"] = "asset"
         asset_detail["asset_matches"] = asset_matches[:8]
         return asset_detail
 

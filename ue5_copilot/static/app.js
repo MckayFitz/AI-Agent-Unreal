@@ -192,7 +192,21 @@ async function apiCall(url, payload, method = "POST") {
     }
 
     const response = await fetch(url, options);
-    return response.json();
+    const responseText = await response.text();
+    let data;
+
+    try {
+        data = responseText ? JSON.parse(responseText) : {};
+    } catch (error) {
+        data = { error: responseText || `Request failed with status ${response.status}.` };
+    }
+
+    if (!response.ok) {
+        const errorMessage = data?.error || data?.message || `Request failed with status ${response.status}.`;
+        throw new Error(errorMessage);
+    }
+
+    return data;
 }
 
 function setScanStatus(text, type = "") {
@@ -326,7 +340,7 @@ async function submitAction() {
         updateAssistantMessage(
             pending,
             modeLabel,
-            "<p>That request failed. Check the server logs and try again.</p>"
+            `<p>${nl2br(error?.message || "That request failed. Check the server logs and try again.")}</p>`
         );
     } finally {
         submitButton.disabled = false;

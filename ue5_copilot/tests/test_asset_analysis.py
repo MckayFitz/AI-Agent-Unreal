@@ -4,6 +4,7 @@ from pathlib import Path
 from app.asset_actions import run_asset_action
 from app.file_indexer import infer_asset_type
 from app.ue_analysis import analyze_deep_asset, build_asset_details, build_project_analysis, find_matching_assets, infer_deep_asset_kind
+from app import main as app_main
 from app.main import (
     build_behavior_tree_scaffold,
     build_control_rig_scaffold,
@@ -520,6 +521,46 @@ class AssetAnalysisTests(unittest.TestCase):
         self.assertEqual(build_pcg_scaffold("ForestScatter")["recommended_asset_name"], "PCG_ForestScatter")
         self.assertEqual(build_motion_matching_scaffold("PlayerLocomotion")["recommended_asset_name"], "MM_PlayerLocomotion")
         self.assertEqual(build_ik_rig_scaffold("PlayerRetarget")["recommended_asset_name"], "IKR_PlayerRetarget")
+
+    def test_selection_analysis_returns_asset_selection_type_for_asset_matches(self):
+        files = [
+            {
+                "path": "Source/MyGame/Public/Player/MyPlayerCharacter.h",
+                "name": "MyPlayerCharacter.h",
+                "extension": ".h",
+                "file_type": "header",
+                "content": """
+                    UCLASS(Blueprintable)
+                    class AMyPlayerCharacter : public ACharacter
+                    {
+                        GENERATED_BODY()
+                    };
+                """,
+            }
+        ]
+        assets = [
+            {
+                "name": "BP_PlayerCharacter.uasset",
+                "path": "C:/Project/Content/Blueprints/BP_PlayerCharacter.uasset",
+                "relative_path": "Content/Blueprints/BP_PlayerCharacter.uasset",
+                "extension": ".uasset",
+                "asset_type": "blueprint",
+                "likely_blueprint": True,
+            }
+        ]
+        analysis = build_project_analysis(files, assets)
+        previous_cache = dict(app_main.PROJECT_CACHE)
+        try:
+            app_main.PROJECT_CACHE["analysis"] = analysis
+            app_main.PROJECT_CACHE["files"] = analysis["files"]
+            app_main.PROJECT_CACHE["assets"] = analysis["assets"]
+            result = app_main.selection_analysis(app_main.SelectionRequest(selection="BP_PlayerCharacter"))
+        finally:
+            app_main.PROJECT_CACHE.clear()
+            app_main.PROJECT_CACHE.update(previous_cache)
+
+        self.assertEqual(result["selection_type"], "asset")
+        self.assertEqual(result["resolved_asset_name"], "BP_PlayerCharacter")
 
 
 if __name__ == "__main__":

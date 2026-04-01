@@ -1119,6 +1119,16 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 return FReply::Handled();
                             }
 
+                            bool bDryRun = false;
+                            if (EditorActionObject->TryGetBoolField(TEXT("dry_run"), bDryRun) && bDryRun)
+                            {
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotPreviewOnlyDryRun", "This previewed editor action is marked as dry-run only and cannot be executed yet."));
+                                }
+                                return FReply::Handled();
+                            }
+
                             if (ActionType != TEXT("rename_asset"))
                             {
                                 if (StatusTextPtr.IsValid())
@@ -1206,14 +1216,23 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                             FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
                             AssetToolsModule.Get().RenameAssets(RenameData);
 
+                            const bool bRenameSucceeded = AssetObject->GetName() == NewName;
                             PendingEditorActionJson.Reset();
                             if (EditorActionPreviewTextBoxPtr.IsValid())
                             {
-                                EditorActionPreviewTextBoxPtr->SetText(LOCTEXT("UE5CopilotEditorActionPreviewConsumed", "Rename action executed. No previewed editor action is pending."));
+                                EditorActionPreviewTextBoxPtr->SetText(
+                                    bRenameSucceeded
+                                        ? LOCTEXT("UE5CopilotEditorActionPreviewConsumed", "Rename action executed. No previewed editor action is pending.")
+                                        : LOCTEXT("UE5CopilotEditorActionPreviewRenameUnverified", "Rename was attempted, but the plugin could not verify that the asset name changed.")
+                                );
                             }
                             if (StatusTextPtr.IsValid())
                             {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameExecuted", "Rename action executed through Unreal editor APIs."));
+                                StatusTextPtr->SetText(
+                                    bRenameSucceeded
+                                        ? LOCTEXT("UE5CopilotRenameExecuted", "Rename action executed through Unreal editor APIs.")
+                                        : LOCTEXT("UE5CopilotRenameUnverified", "Rename was attempted, but the result could not be verified. Check the Content Browser before continuing.")
+                                );
                             }
                             return FReply::Handled();
                         })
