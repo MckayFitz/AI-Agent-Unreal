@@ -22,6 +22,7 @@ public class UE5CopilotAssistant : ModuleRules
             {
                 "ApplicationCore",
                 "AssetRegistry",
+                "AssetTools",
                 "ContentBrowser",
                 "EditorStyle",
                 "Http",

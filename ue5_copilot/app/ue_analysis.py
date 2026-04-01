@@ -254,9 +254,15 @@ def infer_blueprint_links(files, assets):
         for class_name in class_names:
             likely_blueprints = []
             class_stem = class_name.lower().lstrip("au")
+            class_tokens = extract_name_tokens(class_name)
             for asset in asset_candidates:
                 asset_name = asset["name"].rsplit(".", 1)[0].lower()
-                if asset_name.endswith(class_stem) or class_stem in asset_name:
+                asset_tokens = extract_name_tokens(asset_name)
+                if (
+                    asset_name.endswith(class_stem)
+                    or class_stem in asset_name
+                    or (class_tokens and asset_tokens and len(class_tokens.intersection(asset_tokens)) >= 2)
+                ):
                     likely_blueprints.append(asset)
 
             if analysis["asset_links"] or likely_blueprints:
@@ -282,6 +288,14 @@ def annotate_asset(asset):
 
 def infer_asset_family(name, path):
     lowered = f"{name} {path}".lower()
+    if "metasound" in lowered or "ms_" in lowered:
+        return "metasound"
+    if "pcg" in lowered:
+        return "pcg"
+    if "motionmatching" in lowered or "motion_matching" in lowered or "mm_" in lowered:
+        return "motion_matching"
+    if "ikrig" in lowered or "ik_rig" in lowered or "ikr_" in lowered:
+        return "ik_rig"
     if "st_" in lowered or "statetree" in lowered:
         return "state_tree"
     if "cr_" in lowered or "controlrig" in lowered:
@@ -306,10 +320,10 @@ def infer_asset_family(name, path):
         return "material_instance"
     if "m_" in lowered or "material" in lowered:
         return "material"
-    if "bpi_" in lowered or "bp_" in lowered or "blueprint" in lowered:
-        return "blueprint"
     if "wbp_" in lowered or "widget" in lowered or "hud" in lowered or "menu" in lowered:
         return "ui"
+    if "bpi_" in lowered or "bp_" in lowered or "blueprint" in lowered:
+        return "blueprint"
     if "abp_" in lowered or "anim" in lowered:
         return "animation"
     if "weapon" in lowered or "rifle" in lowered or "gun" in lowered:
@@ -341,6 +355,10 @@ def summarize_specialized_assets(files, assets):
         "niagara": [],
         "eqs": [],
         "sequencer": [],
+        "metasound": [],
+        "pcg": [],
+        "motion_matching": [],
+        "ik_rig": [],
     }
 
     for asset in assets:
@@ -392,6 +410,22 @@ def summarize_specialized_assets(files, assets):
         "sequencer": find_family_code_signals(
             files,
             ("LevelSequence", "ULevelSequence", "MovieScene", "SequencePlayer", "Sequencer", "ALevelSequenceActor", "ULevelSequencePlayer")
+        ),
+        "metasound": find_family_code_signals(
+            files,
+            ("MetaSound", "UMetaSoundSource", "UMetaSoundPatch", "AudioComponent", "SetFloatParameter", "SetWaveParameter")
+        ),
+        "pcg": find_family_code_signals(
+            files,
+            ("PCG", "UPCGComponent", "UPCGGraph", "Generate", "Cleanup", "Procedural Content Generation")
+        ),
+        "motion_matching": find_family_code_signals(
+            files,
+            ("MotionMatching", "PoseSearch", "UPoseSearchDatabase", "MotionTrajectory", "Chooser", "AnimNode_MotionMatching")
+        ),
+        "ik_rig": find_family_code_signals(
+            files,
+            ("IKRig", "UIKRigDefinition", "UIKRetargeter", "FullBodyIK", "IKGoal", "Retarget")
         ),
     }
 
@@ -561,6 +595,66 @@ def summarize_specialized_assets(files, assets):
                 "Sequence timing can conflict with multiplayer or stateful systems if not gated carefully.",
             ]
         ),
+        "metasounds": build_family_summary(
+            "metasounds",
+            "MetaSounds",
+            families["metasound"],
+            code_signals["metasound"],
+            "These assets and files likely drive procedural or parameterized audio behavior.",
+            [
+                "Look for audio component setup, runtime parameter writes, and event-driven playback paths together.",
+                "MetaSounds often bridge gameplay state into reactive sound design through named parameters.",
+            ],
+            [
+                "Audio parameters can silently drift from gameplay intent if names or update timing stop matching.",
+                "Heavy procedural audio graphs should be reviewed when many actors can trigger them at once.",
+            ]
+        ),
+        "pcg": build_family_summary(
+            "pcg",
+            "PCG",
+            families["pcg"],
+            code_signals["pcg"],
+            "These assets and files likely control procedural content generation setup and runtime generation triggers.",
+            [
+                "Look for PCG component ownership, graph assignment, and generation trigger timing together.",
+                "PCG often bridges authored rules with runtime or editor generation passes.",
+            ],
+            [
+                "Generation timing and cleanup ownership can become expensive or confusing if multiple systems trigger the same graph.",
+                "Procedural outputs can hide dependencies on tags, landscape layers, or source actors that are easy to miss.",
+            ]
+        ),
+        "motion_matching": build_family_summary(
+            "motion_matching",
+            "Motion Matching",
+            families["motion_matching"],
+            code_signals["motion_matching"],
+            "These assets and files likely support pose-search driven locomotion or animation selection.",
+            [
+                "Look for pose databases, chooser/trajectory inputs, and character locomotion state together.",
+                "Motion matching usually sits at the boundary between movement state and animation selection.",
+            ],
+            [
+                "Bad trajectory or state inputs can make motion-matched animation look noisy or unstable.",
+                "Pose databases and chooser logic can drift from gameplay movement assumptions over time.",
+            ]
+        ),
+        "ik_rig": build_family_summary(
+            "ik_rig",
+            "IK Rig / Retargeting",
+            families["ik_rig"],
+            code_signals["ik_rig"],
+            "These assets and files likely support IK setup, retargeting, or runtime pose adjustment.",
+            [
+                "Look for rig definitions, retarget assets, and character skeletal-mesh ownership together.",
+                "IK assets often bridge authored skeleton data into runtime pose correction or retargeting paths.",
+            ],
+            [
+                "IK assumptions can fail subtly when skeletons, goals, or retarget profiles drift apart.",
+                "Runtime IK updates can become expensive if they are evaluated more broadly than needed.",
+            ]
+        ),
     }
 
     for key, summary in summaries.items():
@@ -578,9 +672,11 @@ def find_matching_assets(assets, selection, limit=8):
     for asset in assets:
         name = asset.get("name", "")
         path = asset.get("path", "")
+        relative_path = asset.get("relative_path", "")
         stem = name.rsplit(".", 1)[0]
         name_lower = name.lower()
         path_lower = path.lower()
+        relative_path_lower = relative_path.lower()
         stem_lower = stem.lower()
         score = 0
 
@@ -590,7 +686,11 @@ def find_matching_assets(assets, selection, limit=8):
             score += 12
         if selection_lower == path_lower:
             score += 14
+        if selection_lower == relative_path_lower:
+            score += 14
         if path_lower.endswith(selection_lower):
+            score += 10
+        if relative_path_lower.endswith(selection_lower):
             score += 10
         if name_lower.startswith(selection_lower):
             score += 8
@@ -599,6 +699,8 @@ def find_matching_assets(assets, selection, limit=8):
         if selection_lower in name_lower:
             score += 4
         if selection_lower in path_lower:
+            score += 3
+        if selection_lower in relative_path_lower:
             score += 3
 
         if score > 0:
@@ -661,6 +763,14 @@ def resolve_asset_summary_key(asset):
         return "blueprints"
     if family == "animation" or "animation_blueprint" in asset_type:
         return "animbps"
+    if family == "metasound":
+        return "metasounds"
+    if family == "pcg":
+        return "pcg"
+    if family == "motion_matching":
+        return "motion_matching"
+    if family == "ik_rig":
+        return "ik_rig"
     if family in {"behavior_tree", "blackboard"}:
         return "behavior_trees"
     if family == "data_asset":
@@ -722,9 +832,12 @@ def merge_reference_results(files, terms, max_results=8):
 
 def infer_asset_specific_cpp_links(asset, files, blueprint_links, family_summary=None):
     stem = asset.get("name", "").rsplit(".", 1)[0].lower()
+    stem_tokens = extract_name_tokens(stem)
     scored = {}
 
     for item in blueprint_links:
+        class_name_lower = item["class_name"].lower()
+        class_tokens = extract_name_tokens(class_name_lower)
         names = [bp.get("name", "").rsplit(".", 1)[0].lower() for bp in item.get("likely_blueprints", [])]
         if stem and any(stem == name or stem in name or name in stem for name in names):
             scored[item["class_name"]] = {
@@ -733,11 +846,26 @@ def infer_asset_specific_cpp_links(asset, files, blueprint_links, family_summary
                 "reason": "Matched inferred Blueprint pairing.",
                 "score": 12 + len(item.get("blueprint_hooks", [])),
             }
+            continue
+        if stem_tokens and class_tokens and len(stem_tokens.intersection(class_tokens)) >= 2:
+            scored[item["class_name"]] = {
+                "class_name": item["class_name"],
+                "path": item.get("path", ""),
+                "reason": "Matched class and asset naming tokens.",
+                "score": 10 + len(item.get("exposed_functions", [])) + len(item.get("editable_properties", [])),
+            }
 
     for file_record in files:
         path_lower = file_record.get("path", "").lower()
         content_lower = file_record.get("content", "").lower()
-        if stem and stem in f"{path_lower} {content_lower}":
+        analysis = file_record.get("analysis", {})
+        class_hits = []
+        for class_info in analysis.get("classes", []):
+            class_tokens = extract_name_tokens(class_info["name"])
+            if stem_tokens and class_tokens and stem_tokens.intersection(class_tokens):
+                class_hits.append(class_info["name"])
+
+        if stem and stem in f"{path_lower} {content_lower}" or class_hits:
             analysis = file_record.get("analysis", {})
             for class_info in analysis.get("classes", []):
                 class_name = class_info["name"]
@@ -750,7 +878,20 @@ def infer_asset_specific_cpp_links(asset, files, blueprint_links, family_summary
                         "score": 0,
                     },
                 )
-                entry["score"] += 4
+                entry["score"] += 6 if class_name in class_hits else 4
+
+            if analysis.get("asset_links"):
+                for class_info in analysis.get("classes", []):
+                    entry = scored.setdefault(
+                        class_info["name"],
+                        {
+                            "class_name": class_info["name"],
+                            "path": file_record.get("path", ""),
+                            "reason": "Blueprint-facing Unreal metadata detected in this file.",
+                            "score": 0,
+                        },
+                    )
+                    entry["score"] += len(analysis["asset_links"])
 
     ranked = sorted(scored.values(), key=lambda item: item["score"], reverse=True)
     supporting = [item["class_name"] for item in ranked[:6]]
@@ -905,6 +1046,10 @@ def humanize_asset_type(value):
         "data asset": "DataAsset",
         "behavior tree": "Behavior Tree",
         "material instance": "Material Instance",
+        "metasound": "MetaSound",
+        "pcg": "PCG",
+        "motion matching": "Motion Matching",
+        "ik rig": "IK Rig",
     }
     return mapping.get(lowered, " ".join(part.capitalize() for part in lowered.split()))
 
@@ -933,6 +1078,26 @@ def infer_deep_asset_kind(asset=None, selection_name="", asset_path="", asset_ki
         return "behavior_tree"
     if any(token in haystack for token in ("input_action", "input_mapping_context", "enhanced_input", "ia_", "imc_", "mappingcontext")):
         return "enhanced_input"
+    if any(token in haystack for token in ("metasound", "meta_sound", "ms_")):
+        return "metasound"
+    if any(token in haystack for token in ("pcg", "procedural content generation")):
+        return "pcg"
+    if any(token in haystack for token in ("motionmatching", "motion_matching", "pose search", "posesearch", "mm_")):
+        return "motion_matching"
+    if any(token in haystack for token in ("state_tree", "statetree", "st_")):
+        return "state_tree"
+    if any(token in haystack for token in ("control_rig", "controlrig", "cr_")):
+        return "control_rig"
+    if any(token in haystack for token in ("niagara", "niagara_system", "ns_")):
+        return "niagara"
+    if any(token in haystack for token in ("eqs", "envquery", "eqs_")):
+        return "eqs"
+    if any(token in haystack for token in ("sequencer", "levelsequence", "movie scene", "moviescene", "ls_")):
+        return "sequencer"
+    if any(token in haystack for token in ("ik_rig", "ikrig", "retarget", "ikr_")):
+        return "ik_rig"
+    if any(token in haystack for token in ("data_asset", "dataasset", "primarydataasset", "da_")):
+        return "data_asset"
     if any(token in haystack for token in ("material_instance", "material", "mi_", "m_")):
         return "material"
     if any(token in haystack for token in ("blueprint", "bp_", "wbp_", "bpi_")):
@@ -1129,6 +1294,10 @@ def family_class_bonus(symbol, path, family_key, reason_parts=None):
         "materials": ("component", "actor", "character", "mesh", "material"),
         "sequencer": ("levelsequence", "sequenceplayer", "actor", "camera", "cinematic"),
         "data_assets": ("manager", "subsystem", "component", "data", "settings"),
+        "metasounds": ("audio", "component", "sound", "music", "voice"),
+        "pcg": ("pcg", "component", "generator", "world", "level"),
+        "motion_matching": ("character", "movement", "anim", "pose", "trajectory"),
+        "ik_rig": ("skeletal", "mesh", "anim", "rig", "retarget"),
     }
 
     penalties = {
@@ -1192,6 +1361,10 @@ def infer_related_families(family_key, assets, signals):
         "niagara": ["materials", "sequencer", "behavior_trees"],
         "eqs": ["behavior_trees", "state_trees"],
         "sequencer": ["niagara", "control_rig", "materials"],
+        "metasounds": ["sequencer", "materials", "animbps"],
+        "pcg": ["state_trees", "niagara", "materials"],
+        "motion_matching": ["animbps", "control_rig", "ik_rig"],
+        "ik_rig": ["control_rig", "animbps", "motion_matching"],
     }
 
     result = []
@@ -1231,6 +1404,10 @@ def infer_likely_entry_points(family_key, signals):
         "niagara": ["Look in gameplay event handlers that spawn effects or attach components."],
         "eqs": ["Look in AIController, behavior tasks, or target-selection code first."],
         "sequencer": ["Look in sequence actor/player setup and scripted event triggers first."],
+        "metasounds": ["Look in audio component setup and gameplay event handlers that push sound parameters first."],
+        "pcg": ["Look in PCG component ownership and generation trigger points first."],
+        "motion_matching": ["Look in character locomotion code, trajectory generation, and anim node setup first."],
+        "ik_rig": ["Look in skeletal mesh setup, retarget ownership, and animation pipeline glue first."],
     }
 
     return dedupe_preserve_order(path_hints + defaults.get(family_key, []))[:6]
@@ -1248,6 +1425,10 @@ def infer_family_workflow_chain(family_key):
         "niagara": ["Gameplay event", "Niagara spawn/setup", "Variable update", "Visible effect"],
         "eqs": ["AI request", "Context", "Query execution", "Scored result", "Decision/action"],
         "sequencer": ["Trigger", "LevelSequence actor/player", "Track evaluation", "Cinematic/gameplay event"],
+        "metasounds": ["Gameplay event", "Audio component/MetaSound", "Parameter update", "Audible feedback"],
+        "pcg": ["Source actors/data", "PCG graph", "Generation trigger", "Spawned/generated result"],
+        "motion_matching": ["Movement state", "Trajectory input", "Pose search/database", "Animation selection"],
+        "ik_rig": ["Skeleton/mesh", "IK Rig or retarget asset", "Goal/solver update", "Pose result"],
     }
     return chains.get(family_key, [])
 
@@ -1333,6 +1514,15 @@ def infer_bridge_points(family_key, summary):
     if family_key == "materials":
         bridges.append("Actors/components likely bridge material parameters to runtime visual feedback.")
 
+    if family_key == "metasounds":
+        bridges.append("Gameplay events and audio component parameters likely bridge runtime state into MetaSound playback.")
+
+    if family_key == "pcg":
+        bridges.append("A component, actor, or world-generation owner likely bridges PCG graphs into spawned content.")
+
+    if family_key in {"motion_matching", "ik_rig"}:
+        bridges.append("Character movement and skeletal-animation state likely bridge these assets into runtime pose selection or correction.")
+
     return dedupe_preserve_order(bridges)
 
 
@@ -1398,6 +1588,30 @@ def infer_debugging_checklist(family_key, summary):
             "Verify dynamic material instances are created once and reused.",
             "Check parameter names and update timing if visuals do not react.",
             "Inspect Tick-driven parameter updates for unnecessary cost.",
+        ])
+    elif family_key == "metasounds":
+        checklist.extend([
+            "Verify the intended gameplay event actually triggers the MetaSound playback path.",
+            "Check parameter names and update timing if the sound plays but does not react as expected.",
+            "Inspect the owning audio component or sound manager before assuming the asset graph is wrong.",
+        ])
+    elif family_key == "pcg":
+        checklist.extend([
+            "Confirm the PCG graph is assigned to the expected component or actor owner.",
+            "Check what event or lifecycle moment triggers generation and cleanup.",
+            "Inspect source actors, tags, or terrain/context inputs before assuming the graph logic is wrong.",
+        ])
+    elif family_key == "motion_matching":
+        checklist.extend([
+            "Verify trajectory and locomotion inputs are updated before pose selection runs.",
+            "Check the pose database/chooser assumptions when animation selection feels unstable.",
+            "Inspect the owning character and anim pipeline before blaming the database alone.",
+        ])
+    elif family_key == "ik_rig":
+        checklist.extend([
+            "Confirm the correct rig or retarget asset is assigned to the expected skeletal mesh path.",
+            "Check goal/solver assumptions when limbs or retargeted poses look subtly wrong.",
+            "Inspect character mesh, skeleton, and retarget profile compatibility before changing solver values.",
         ])
     elif family_key == "data_assets":
         checklist.extend([
@@ -1940,10 +2154,30 @@ def analyze_deep_asset(asset_kind, exported_text, selection_name="", class_name=
         result.update(analyze_behavior_tree_export(lines, text))
     elif kind in {"enhanced_input", "input", "input_mapping"}:
         result.update(analyze_input_export(lines, text))
+    elif kind in {"metasound", "meta_sound"}:
+        result.update(analyze_metasound_export(lines, text))
+    elif kind == "pcg":
+        result.update(analyze_pcg_export(lines, text))
+    elif kind in {"motion_matching", "motion matching"}:
+        result.update(analyze_motion_matching_export(lines, text))
+    elif kind in {"state_tree", "state tree"}:
+        result.update(analyze_state_tree_export(lines, text))
+    elif kind in {"control_rig", "control rig"}:
+        result.update(analyze_control_rig_export(lines, text))
+    elif kind in {"niagara", "niagara_system"}:
+        result.update(analyze_niagara_export(lines, text))
+    elif kind == "eqs":
+        result.update(analyze_eqs_export(lines, text))
+    elif kind == "sequencer":
+        result.update(analyze_sequencer_export(lines, text))
+    elif kind in {"ik_rig", "ik rig"}:
+        result.update(analyze_ik_rig_export(lines, text))
+    elif kind == "data_asset":
+        result.update(analyze_data_asset_export(lines, text))
     elif kind in {"animbp", "animbp", "animation_blueprint", "anim_blueprint"}:
         result.update(analyze_animbp_export(lines, text))
     else:
-        result["summary"] = "This asset kind is not yet deeply analyzed. Paste exported graph/state text for Blueprint, Material, Behavior Tree, Enhanced Input, or AnimBP."
+        result["summary"] = "This asset kind is not yet deeply analyzed. Paste exported graph/state text for Blueprint, Material, Behavior Tree, Enhanced Input, StateTree, Control Rig, Niagara, EQS, Sequencer, MetaSound, PCG, Motion Matching, IK Rig, DataAsset, or AnimBP."
 
     if family_summary:
         result["gameplay_role"] = family_summary.get("role_guess", "")
@@ -2049,6 +2283,284 @@ def analyze_animbp_export(lines, text):
         "summary": "This AnimBP appears to drive animation state and transition behavior from character/anim-instance data.",
         "key_elements": states,
         "flow_summary": states[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_metasound_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("wave", "oscillator", "trigger", "parameter", "mix", "envelope", "delay", "output", "graph input", "graph output"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "parameter" not in lowered and "graph input" not in lowered:
+        missing.append("No obvious runtime parameter or graph input nodes were detected.")
+    if "output" not in lowered:
+        missing.append("No obvious audio output path was detected in the exported MetaSound text.")
+    if "trigger" not in lowered and "play" not in lowered:
+        missing.append("No obvious trigger/play flow was detected, so timing behavior may be unclear.")
+    if "delay" in lowered and "trigger" not in lowered:
+        wrong.append("Delay-like nodes are visible without a clear trigger flow, which can hide timing bugs.")
+    if "wave" in lowered and "mix" not in lowered and "envelope" not in lowered:
+        wrong.append("Wave playback is visible, but no obvious shaping or mixing nodes were detected.")
+
+    return {
+        "summary": "This MetaSound appears to drive procedural or parameterized audio flow through trigger, parameter, and output nodes.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_pcg_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("surface", "points", "spawn", "scatter", "filter", "density", "attribute", "sampler", "volume", "graph input", "graph output"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "spawn" not in lowered and "scatter" not in lowered:
+        missing.append("No obvious spawn or scatter stage was detected in the exported PCG text.")
+    if "points" not in lowered and "surface" not in lowered and "volume" not in lowered:
+        missing.append("No obvious point/surface/volume source was detected, so generation inputs may be unclear.")
+    if "filter" not in lowered and "attribute" not in lowered:
+        missing.append("No obvious filtering or attribute-selection stage was detected.")
+    if "density" in lowered and "filter" not in lowered:
+        wrong.append("Density controls are visible without a clear filtering stage, which can make outputs noisy or hard to predict.")
+    if lowered.count("spawn") > 2 and "cleanup" not in lowered:
+        wrong.append("Multiple spawn stages are visible without an obvious cleanup or ownership story.")
+
+    return {
+        "summary": "This PCG asset appears to drive procedural generation through source selection, filtering, and spawn/output stages.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_motion_matching_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("pose", "trajectory", "database", "chooser", "cost", "query", "schema", "channel", "history"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "pose" not in lowered and "database" not in lowered:
+        missing.append("No obvious pose database or pose-search stage was detected.")
+    if "trajectory" not in lowered:
+        missing.append("No obvious trajectory input was detected, so movement-driven matching may be unclear.")
+    if "chooser" not in lowered and "query" not in lowered and "cost" not in lowered:
+        missing.append("No obvious selection/scoring stage was detected for the motion-matching decision.")
+    if "database" in lowered and "trajectory" not in lowered:
+        wrong.append("A pose database is visible without a clear trajectory input, which can make matching quality unstable.")
+    if "history" in lowered and "pose" not in lowered:
+        wrong.append("History-related data is visible without a clear pose-selection stage.")
+
+    return {
+        "summary": "This Motion Matching asset appears to drive animation choice through trajectory, pose database, and scoring/selection data.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_state_tree_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("state", "transition", "task", "evaluator", "condition", "parameter", "enter state", "exit state"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "state" not in lowered:
+        missing.append("No obvious states were detected in the exported StateTree text.")
+    if "transition" not in lowered and "condition" not in lowered:
+        missing.append("No obvious transition or condition logic was detected.")
+    if "task" not in lowered:
+        missing.append("No obvious task execution stage was detected, so runtime work ownership may be unclear.")
+    if "evaluator" in lowered and "parameter" not in lowered:
+        wrong.append("Evaluators are visible without obvious shared parameters or input state, which can hide ownership problems.")
+
+    return {
+        "summary": "This StateTree appears to drive structured gameplay state transitions through states, evaluators, conditions, and tasks.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_control_rig_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("control", "bone", "solver", "hierarchy", "transform", "execute", "forward solve", "backward solve"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "control" not in lowered and "bone" not in lowered:
+        missing.append("No obvious controls or driven bones were detected in the exported Control Rig text.")
+    if "solver" not in lowered and "transform" not in lowered:
+        missing.append("No obvious solve or transform stage was detected.")
+    if "hierarchy" not in lowered:
+        missing.append("No hierarchy access was detected, so rig ownership may be unclear.")
+    if "backward solve" in lowered and "forward solve" not in lowered:
+        wrong.append("Backward solve is visible without an obvious forward solve path, which can make rig flow harder to reason about.")
+
+    return {
+        "summary": "This Control Rig appears to drive procedural rig or pose updates through controls, hierarchy access, and solve stages.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_niagara_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("emitter", "spawn", "update", "particle", "system", "parameter", "event", "renderer", "initialize"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "emitter" not in lowered and "system" not in lowered:
+        missing.append("No obvious emitter/system ownership was detected in the exported Niagara text.")
+    if "spawn" not in lowered and "initialize" not in lowered:
+        missing.append("No obvious spawn or initialization stage was detected.")
+    if "update" not in lowered:
+        missing.append("No obvious particle update stage was detected.")
+    if "renderer" not in lowered:
+        missing.append("No obvious renderer setup was detected, so visual output may be incomplete.")
+    if "event" in lowered and "parameter" not in lowered:
+        wrong.append("Event-driven behavior is visible without clear parameter inputs, which can make effect control brittle.")
+
+    return {
+        "summary": "This Niagara asset appears to drive particle or VFX behavior through emitter setup, spawn/update stages, and runtime parameters.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_eqs_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("generator", "test", "context", "score", "query", "item", "distance", "pathfinding"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "generator" not in lowered:
+        missing.append("No obvious EQS generator was detected.")
+    if "test" not in lowered and "score" not in lowered:
+        missing.append("No obvious test or scoring stage was detected in the query.")
+    if "context" not in lowered:
+        missing.append("No obvious context was detected, so the query origin/target assumptions may be unclear.")
+    if lowered.count("test") > 4 and "weight" not in lowered and "score" not in lowered:
+        wrong.append("Many EQS tests are visible without obvious weighting or scoring hints, which can make query results hard to reason about.")
+
+    return {
+        "summary": "This EQS asset appears to drive AI query generation, testing, and scoring for environmental decisions.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_sequencer_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("track", "section", "binding", "camera", "event", "sequence", "shot", "key"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "track" not in lowered and "section" not in lowered:
+        missing.append("No obvious tracks or sections were detected in the exported Sequencer text.")
+    if "binding" not in lowered and "camera" not in lowered:
+        missing.append("No obvious actor/camera binding was detected.")
+    if "event" not in lowered and "key" not in lowered:
+        missing.append("No obvious event or keyed timing data was detected.")
+    if "shot" in lowered and "camera" not in lowered:
+        wrong.append("Shot-like sequencing is visible without obvious camera ownership, which can make cinematic intent unclear.")
+
+    return {
+        "summary": "This Sequencer asset appears to drive time-based presentation through tracks, bindings, and keyed sequence events.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_ik_rig_export(lines, text):
+    lowered = text.lower()
+    nodes = [
+        line for line in lines
+        if any(word in line.lower() for word in ("goal", "chain", "solver", "retarget", "effector", "bone", "root", "pose"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "chain" not in lowered and "bone" not in lowered:
+        missing.append("No obvious chains or driven bones were detected in the exported IK Rig text.")
+    if "goal" not in lowered and "effector" not in lowered:
+        missing.append("No obvious IK goals or effectors were detected.")
+    if "solver" not in lowered and "retarget" not in lowered:
+        missing.append("No obvious solver or retarget stage was detected.")
+    if "retarget" in lowered and "chain" not in lowered:
+        wrong.append("Retargeting is visible without obvious chain definitions, which can make pose transfer brittle.")
+
+    return {
+        "summary": "This IK Rig asset appears to drive chain, goal, and solver-based pose adjustment or retargeting.",
+        "key_elements": nodes,
+        "flow_summary": nodes[:8],
+        "what_looks_wrong": wrong,
+        "what_is_missing": missing,
+    }
+
+
+def analyze_data_asset_export(lines, text):
+    lowered = text.lower()
+    fields = [
+        line for line in lines
+        if any(word in line.lower() for word in ("name", "id", "tag", "soft", "class", "reference", "value", "row", "entry"))
+    ][:14]
+    wrong = []
+    missing = []
+
+    if "id" not in lowered and "name" not in lowered:
+        missing.append("No obvious identifiers or naming fields were detected in the exported DataAsset text.")
+    if "soft" not in lowered and "reference" not in lowered and "class" not in lowered:
+        missing.append("No obvious reference fields were detected, so ownership of related assets may be unclear.")
+    if "value" not in lowered and "entry" not in lowered:
+        missing.append("No obvious gameplay/config values were detected from the export.")
+    if "class" in lowered and "soft" not in lowered:
+        wrong.append("Hard class references may be present without obvious soft-reference decoupling.")
+
+    return {
+        "summary": "This DataAsset appears to hold structured gameplay or content configuration fields consumed by runtime systems.",
+        "key_elements": fields,
+        "flow_summary": fields[:8],
         "what_looks_wrong": wrong,
         "what_is_missing": missing,
     }

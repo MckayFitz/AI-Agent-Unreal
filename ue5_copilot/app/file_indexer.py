@@ -159,11 +159,13 @@ def scan_project(project_path: str):
         if not looks_like_text_file(file_path):
             if suffix in BINARY_EXTENSIONS:
                 if suffix in {".uasset", ".umap"}:
+                    relative_path = str(file_path.relative_to(root))
                     asset_files.append({
                         "path": str(file_path),
+                        "relative_path": relative_path,
                         "name": file_path.name,
                         "extension": suffix,
-                        "asset_type": infer_asset_type(file_path),
+                        "asset_type": infer_asset_type(file_path, relative_path),
                         "likely_blueprint": is_likely_blueprint_asset(file_path),
                     })
                 skipped_binary_count += 1
@@ -229,11 +231,41 @@ def is_likely_blueprint_asset(file_path: Path) -> bool:
     return file_path.suffix.lower() == ".uasset" and stem.startswith(BLUEPRINT_ASSET_HINTS)
 
 
-def infer_asset_type(file_path: Path) -> str:
+def infer_asset_type(file_path: Path, relative_path: str = "") -> str:
     stem = file_path.stem.lower()
+    lowered_path = f"{relative_path} {file_path.parent}".lower()
 
     if file_path.suffix.lower() == ".umap":
         return "map"
+    if "metasound" in lowered_path or stem.startswith("ms_"):
+        return "metasound"
+    if "pcg" in lowered_path or stem.startswith("pcg_"):
+        return "pcg"
+    if "motionmatching" in lowered_path or "motion_matching" in lowered_path or stem.startswith("mm_"):
+        return "motion_matching"
+    if "ikrig" in lowered_path or "ik_rig" in lowered_path or stem.startswith("ikr_"):
+        return "ik_rig"
+    if "content/ui" in lowered_path or "widgets" in lowered_path or "umg" in lowered_path:
+        return "widget_blueprint" if stem.startswith("wbp_") else "ui_asset"
+    if "behaviortree" in lowered_path or "behavior_tree" in lowered_path or "blackboard" in lowered_path:
+        if stem.startswith("bb_") or "blackboard" in lowered_path:
+            return "blackboard"
+        return "behavior_tree"
+    if "materials" in lowered_path or "materials" in stem:
+        if stem.startswith("mi_"):
+            return "material_instance"
+        return "material"
+    if "anim" in lowered_path or "animation" in lowered_path:
+        if stem.startswith("abp_"):
+            return "animation_blueprint"
+        return "animation_asset"
+    if "dataasset" in lowered_path or "primarydataasset" in lowered_path or "dataassets" in lowered_path:
+        return "data_asset"
+    if "input" in lowered_path:
+        if stem.startswith("imc_") or "mappingcontext" in lowered_path:
+            return "input_mapping_context"
+        if stem.startswith("ia_") or "inputaction" in lowered_path:
+            return "input_action"
     if stem.startswith("st_") or "statetree" in stem:
         return "state_tree"
     if stem.startswith("cr_") or "controlrig" in stem:

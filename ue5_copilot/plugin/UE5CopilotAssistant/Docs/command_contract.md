@@ -13,6 +13,23 @@ The backend also supports plan-oriented routes for:
 - asset scaffolds
 - asset edit plans
 
+Current backend family coverage now includes:
+- `Blueprints`
+- `AnimBPs`
+- `Materials`
+- `Behavior Trees`
+- `Enhanced Input`
+- `DataAssets`
+- `StateTrees`
+- `Control Rig`
+- `Niagara`
+- `EQS`
+- `Sequencer`
+- `MetaSounds`
+- `PCG`
+- `Motion Matching`
+- `IK Rig`
+
 Those newer flows are still web-app-first and plan-only. The plugin does not execute editor mutations yet.
 
 ## Contract shape
@@ -51,6 +68,26 @@ Phase C: confirmed execution
 - `add_blueprint_function_stub`
 - `tweak_material_parameter`
 - `modify_behavior_tree`
+- `modify_state_tree`
+- `modify_control_rig`
+- `modify_niagara_system`
+- `modify_eqs_query`
+- `modify_level_sequence`
+- `modify_metasound`
+- `modify_pcg_graph`
+- `modify_motion_matching_asset`
+- `modify_ik_rig`
+
+## Current route expectations
+
+The backend currently exposes these planning and analysis routes for plugin use:
+- `/plugin/selection-context`
+- `/plugin/asset-details`
+- `/plugin/asset-edit-plan`
+- `/asset-scaffold`
+- `/asset-deep-analysis`
+
+The backend can already return scaffold, inspection, and edit-plan payloads for the supported asset families listed above. Plugin-side mutation and confirmation UX is still the next phase.
 
 ## Example flow
 

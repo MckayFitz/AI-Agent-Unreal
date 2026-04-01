@@ -41,15 +41,15 @@ const MODE_HELP = {
     },
     assetScaffold: {
         title: "Generate Asset Scaffold",
-        text: "Generate a safe starter scaffold for a new asset type without mutating the project yet.",
+        text: "Generate a safe starter scaffold for a new asset type without mutating the project yet. Use Advanced Options for asset kind, purpose, and optional class/parent context.",
         example: "EnemyCombatSettings",
         placeholder: "Enter the new asset name you want to scaffold.",
     },
     deepAsset: {
         title: "Deep Asset Analysis",
-        text: "Paste exported graph or state text for a selected asset. Auto-detect usually picks the right analyzer.",
+        text: "Paste exported graph or state text for a selected asset. Use Advanced Options to force a kind when auto-detect is ambiguous.",
         example: "Paste copied Blueprint graph text or a Behavior Tree export here.",
-        placeholder: "Paste exported Blueprint, Material, Behavior Tree, Enhanced Input, or AnimBP text here.",
+        placeholder: "Paste exported Blueprint, Material, Behavior Tree, Enhanced Input, StateTree, Control Rig, Niagara, EQS, Sequencer, MetaSound, PCG, Motion Matching, IK Rig, DataAsset, or AnimBP text here.",
     },
     references: {
         title: "Find References",
@@ -63,6 +63,44 @@ const MODE_HELP = {
         example: "Source/MyGame/Player/MyPlayerCharacter.cpp",
         placeholder: "Enter a scanned file path or file name to explain.",
     },
+};
+
+const SCAFFOLD_KIND_HELP = {
+    blueprint_class: { example: "BP_InteractableDoor", note: "Good for gameplay-facing Blueprint classes with a clear parent class." },
+    animbp: { example: "ABP_PlayerLocomotion", note: "Best when you want a starter animation-state plan instead of graph generation." },
+    data_asset: { example: "DA_WeaponStats", note: "Use this for designer-editable config assets and strongly-owned data." },
+    material: { example: "M_WeaponGlow", note: "Starts with a small parameterized material plan you can later instance." },
+    behavior_tree: { example: "BT_EnemyCombat", note: "Creates a Behavior Tree plus Blackboard-oriented starter plan." },
+    input_action: { example: "IA_Sprint", note: "Good for a single Enhanced Input action with minimal assumptions." },
+    input_mapping_context: { example: "IMC_PlayerDefault", note: "Use this when you need a context-level binding plan." },
+    state_tree: { example: "ST_EnemyDecision", note: "Good for structured AI or gameplay state flow." },
+    control_rig: { example: "CR_PlayerUpperBody", note: "Use this for procedural rig ownership and starter control planning." },
+    niagara: { example: "NS_ImpactDust", note: "Best for gameplay VFX systems with clear spawn/update ownership." },
+    eqs: { example: "EQS_FindCover", note: "Use this when the gameplay goal is an AI query or position-scoring flow." },
+    sequencer: { example: "LS_Intro", note: "Good for cinematic or event-timed presentation assets." },
+    metasound: { example: "MS_WeaponFire", note: "Use this for reactive audio graphs and runtime parameter-driven sound." },
+    pcg: { example: "PCG_ForestScatter", note: "Best for procedural generation rules and spawn/filter flows." },
+    motion_matching: { example: "MM_PlayerLocomotion", note: "Use this for pose-search driven locomotion or animation selection." },
+    ik_rig: { example: "IKR_PlayerRetarget", note: "Good for IK chain, goal, and retarget setup planning." },
+};
+
+const DEEP_KIND_HELP = {
+    auto: { example: "Leave this on auto when the selection name or asset path is clear.", note: "Auto-detect uses selection name, asset path, and family signals." },
+    blueprint: { example: "Paste copied Blueprint graph text with events, branches, and calls.", note: "Best for execution flow and data access reasoning." },
+    material: { example: "Paste parameter, texture, and math-node export text.", note: "Useful for parameterization and runtime override checks." },
+    behavior_tree: { example: "Paste tree/task/service/decorator export text.", note: "Best for AI flow, Blackboard, and branch ownership." },
+    enhanced_input: { example: "Paste Input Action or Mapping Context export text.", note: "Useful for bindings, triggers, and context ownership." },
+    state_tree: { example: "Paste states, evaluators, conditions, and task text.", note: "Best for transition logic and state ownership." },
+    control_rig: { example: "Paste controls, hierarchy, and solve-stage text.", note: "Useful for control ownership and rig-flow debugging." },
+    niagara: { example: "Paste emitter/system spawn-update-render text.", note: "Best for effect flow and parameter-driven behavior." },
+    eqs: { example: "Paste generator, context, and test/scoring text.", note: "Useful for AI query intent and scoring issues." },
+    sequencer: { example: "Paste track, section, event, and binding text.", note: "Best for timing, binding, and presentation flow." },
+    metasound: { example: "Paste graph inputs, playback, envelope, and output text.", note: "Useful for trigger flow and audio-parameter ownership." },
+    pcg: { example: "Paste source, filter, attribute, and spawn/output text.", note: "Best for generation ownership and filter-chain reasoning." },
+    motion_matching: { example: "Paste pose database, trajectory, chooser, and scoring text.", note: "Useful for movement input and pose-selection debugging." },
+    ik_rig: { example: "Paste chains, goals, solvers, and retarget text.", note: "Best for pose-correction and retarget ownership issues." },
+    data_asset: { example: "Paste exported fields, ids, references, and values.", note: "Useful for config ownership and reference-shape checks." },
+    animbp: { example: "Paste state machine, transition, montage, and notify text.", note: "Best for animation-state flow and gameplay bridge analysis." },
 };
 
 function escapeHtml(value) {
@@ -235,9 +273,28 @@ function currentModeLabel() {
 
 function updateModeGuide() {
     const help = MODE_HELP[actionSelect.value] || MODE_HELP.ask;
+    let text = help.text;
+    let example = help.example;
+
+    if (actionSelect.value === "assetScaffold") {
+        const kindHelp = SCAFFOLD_KIND_HELP[assetScaffoldKindSelect.value];
+        if (kindHelp) {
+            text = `${help.text} ${kindHelp.note}`;
+            example = kindHelp.example;
+        }
+    }
+
+    if (actionSelect.value === "deepAsset") {
+        const kindHelp = DEEP_KIND_HELP[deepAssetKindSelect.value];
+        if (kindHelp) {
+            text = `${help.text} ${kindHelp.note}`;
+            example = kindHelp.example;
+        }
+    }
+
     modeHelpTitle.textContent = help.title;
-    modeHelpText.textContent = help.text;
-    modeHelpExample.textContent = help.example;
+    modeHelpText.textContent = text;
+    modeHelpExample.textContent = example;
     promptInput.placeholder = help.placeholder;
 }
 
@@ -410,7 +467,7 @@ async function generateAssetScaffold(primaryInput) {
     return {
         html: renderAssetScaffold(data),
         meta: data.asset_kind || "Scaffold",
-        clearPrompt: false,
+        clearPrompt: true,
     };
 }
 
@@ -650,6 +707,7 @@ function renderAssetScaffold(data) {
         <section class="result-section">
             <h3>${escapeHtml(data.title || "Asset Scaffold")}</h3>
             <p>${escapeHtml(data.summary || "")}</p>
+            <p><strong>Asset kind:</strong> ${escapeHtml(data.asset_kind || "Unknown")}</p>
             <p><strong>Recommended asset name:</strong> ${escapeHtml(data.recommended_asset_name || "None")}</p>
             <p><strong>Recommended asset path:</strong> ${escapeHtml(data.recommended_asset_path || "None")}</p>
             ${data.recommended_class_name ? `<p><strong>Recommended class:</strong> ${escapeHtml(data.recommended_class_name)}</p>` : ""}
@@ -676,6 +734,7 @@ function renderAssetEditPlan(data) {
         <section class="result-section">
             <h3>${escapeHtml(data.title || "Asset Edit Plan")}</h3>
             <p>${escapeHtml(data.summary || "")}</p>
+            <p><strong>Edit kind:</strong> ${escapeHtml(data.asset_kind || "Unknown")}</p>
             <p><strong>Asset:</strong> ${escapeHtml(data.asset_name || "None")}</p>
             <p><strong>Path:</strong> ${escapeHtml(data.asset_path || "None")}</p>
             <p><strong>Linked owner:</strong> ${escapeHtml(data.linked_cpp_owner || "None")}</p>
@@ -784,12 +843,13 @@ async function explainBlueprintNodes(nodesText) {
 }
 
 async function deepAnalyzeAsset(exportedText) {
-    const selectionName = selectionInput.value.trim() || promptInput.value.trim();
+    const selectionName = selectionInput.value.trim();
     const data = await apiCall("/asset-deep-analysis", {
         asset_kind: deepAssetKindSelect.value,
         exported_text: exportedText,
         selection_name: selectionName,
         class_name: classLinkInput.value.trim(),
+        asset_path: filePathInput.value.trim(),
         source: "web",
     });
     if (data.error) {
@@ -803,6 +863,7 @@ async function deepAnalyzeAsset(exportedText) {
                 <p><strong>${escapeHtml(data.resolved_asset_name || data.selection_name || data.asset_kind)}</strong></p>
                 <p>${escapeHtml(data.summary || "")}</p>
                 <p><strong>Gameplay role:</strong> ${escapeHtml(data.gameplay_role || "Not inferred")}</p>
+                <p><strong>Asset path:</strong> ${escapeHtml(data.asset_path || "Not provided")}</p>
             </section>
             <section class="result-section">
                 <h3>Resolved Kind</h3>
@@ -813,8 +874,16 @@ async function deepAnalyzeAsset(exportedText) {
                 ${renderList(data.key_elements || [])}
             </section>
             <section class="result-section">
+                <h3>Flow Summary</h3>
+                ${renderList(data.flow_summary || [])}
+            </section>
+            <section class="result-section">
                 <h3>What Looks Wrong</h3>
                 ${renderList(data.what_looks_wrong || [])}
+            </section>
+            <section class="result-section">
+                <h3>What Is Missing</h3>
+                ${renderList(data.what_is_missing || [])}
             </section>
         `,
     };
@@ -944,6 +1013,8 @@ async function analyzeTaskWorkflow(goal) {
 scanButton.addEventListener("click", scanProject);
 submitButton.addEventListener("click", submitAction);
 actionSelect.addEventListener("change", updateModeGuide);
+assetScaffoldKindSelect.addEventListener("change", updateModeGuide);
+deepAssetKindSelect.addEventListener("change", updateModeGuide);
 
 promptInput.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {

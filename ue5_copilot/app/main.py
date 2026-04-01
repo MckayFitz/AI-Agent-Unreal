@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from app.file_indexer import scan_project
+from app.asset_actions import run_asset_action
 from app.code_reader import search_files
 from app.search_index import build_search_index
 from app.prompts import (
@@ -24,7 +25,6 @@ from app.prompts import (
     TASK_WORKFLOW_SYSTEM_PROMPT,
 )
 from app.ue_analysis import (
-    analyze_deep_asset,
     analyze_reflection_text,
     build_file_explanation,
     build_asset_details,
@@ -35,7 +35,6 @@ from app.ue_analysis import (
     find_matching_assets,
     find_references,
     generate_code_suggestions,
-    infer_deep_asset_kind,
     summarize_specialized_assets,
     build_task_workflow,
 )
@@ -136,6 +135,7 @@ class PluginSelectionRequest(BaseModel):
     selection_type: str | None = None
     asset_path: str | None = None
     class_name: str | None = None
+    change_request: str | None = None
     source: str | None = None
 
 
@@ -372,29 +372,11 @@ def review_file(request: FileRequest):
 
 @app.post("/blueprint-links")
 def blueprint_links(request: BlueprintLinkRequest):
-    class_name = request.class_name.strip().lower()
-    analysis = PROJECT_CACHE["analysis"]
-    if not class_name:
-        return {"error": "Enter a C++ class name first."}
-    if not analysis:
-        return {"error": "No project has been scanned yet."}
-
-    matches = []
-    for item in analysis["blueprint_links"]:
-        if class_name in item["class_name"].lower():
-            matches.append(item)
-
-    asset_fallback = []
-    for asset in analysis["assets"]:
-        asset_name = asset["name"].lower()
-        if class_name in asset_name or asset_name.endswith(class_name.lstrip("au")):
-            asset_fallback.append(asset)
-
-    return {
-        "class_name": request.class_name,
-        "matches": matches,
-        "asset_fallback": asset_fallback[:8],
-    }
+    return run_asset_action(
+        "blueprint_links",
+        analysis=PROJECT_CACHE["analysis"],
+        class_name=request.class_name,
+    )
 
 
 @app.get("/architecture-map")
@@ -452,37 +434,13 @@ def specialized_assets():
 
 @app.post("/specialized-assets/family")
 def specialized_asset_family(request: AssetFamilyRequest):
-    analysis = PROJECT_CACHE["analysis"]
-    if not analysis:
-        return {"error": "No project has been scanned yet."}
-
-    summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
-    family = request.family.strip().lower()
-    aliases = {
-        "blueprints": "blueprints",
-        "animbps": "animbps",
-        "behavior trees": "behavior_trees",
-        "behavior_trees": "behavior_trees",
-        "dataassets": "data_assets",
-        "data_assets": "data_assets",
-        "enhanced input": "enhanced_input",
-        "enhanced_input": "enhanced_input",
-        "materials": "materials",
-        "statetrees": "state_trees",
-        "state_trees": "state_trees",
-        "control rig": "control_rig",
-        "control_rig": "control_rig",
-        "niagara": "niagara",
-        "eqs": "eqs",
-        "sequencer": "sequencer",
-    }
-    resolved = aliases.get(family, family)
-    if resolved not in summaries:
-        return {"error": "Unknown family. Try enhanced_input, behavior_trees, data_assets, materials, animbps, state_trees, control_rig, niagara, eqs, or sequencer."}
-    summary = summaries[resolved]
-    if os.getenv("OPENAI_API_KEY") and (summary["assets"] or summary["code_signals"]):
-        summary["ai_summary"] = summarize_specialized_family_with_llm(summary)
-    return summary
+    return run_asset_action(
+        "specialized_asset_family",
+        analysis=PROJECT_CACHE["analysis"],
+        family=request.family,
+        include_ai_summary=bool(os.getenv("OPENAI_API_KEY")),
+        summarize_with_llm=summarize_specialized_family_with_llm,
+    )
 
 
 @app.post("/selection-analysis")
@@ -535,29 +493,23 @@ def selection_analysis(request: SelectionRequest):
 
 @app.post("/asset-details")
 def asset_details(request: AssetDetailRequest):
-    selection = request.selection.strip()
-    if not selection:
-        return {"error": "Enter an asset name or scanned asset path."}
-
-    analysis = PROJECT_CACHE["analysis"]
-    if not analysis:
-        return {"error": "No project has been scanned yet."}
-
-    asset_matches = find_matching_assets(analysis["assets"], selection, limit=8)
-    if not asset_matches:
-        return {"error": "No matching scanned asset was found."}
-
-    summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
-    result = build_asset_details(
-        selection=selection,
-        asset=asset_matches[0],
-        files=analysis["files"],
-        assets=analysis["assets"],
-        blueprint_links=analysis["blueprint_links"],
-        family_summaries=summaries,
+    return run_asset_action(
+        "asset_details",
+        analysis=PROJECT_CACHE["analysis"],
+        selection=request.selection,
     )
-    result["asset_matches"] = asset_matches[:8]
-    return result
+
+
+@app.post("/plugin/asset-details")
+def plugin_asset_details(request: PluginSelectionRequest):
+    return run_asset_action(
+        "plugin_asset_details",
+        analysis=PROJECT_CACHE["analysis"],
+        selection_name=request.selection_name or "",
+        asset_path=request.asset_path or "",
+        class_name=request.class_name or "",
+        source=request.source or "plugin",
+    )
 
 
 @app.post("/asset-scaffold")
@@ -576,14 +528,38 @@ def asset_scaffold(request: AssetScaffoldRequest):
         "blueprint": "blueprint_class",
         "blueprint_class": "blueprint_class",
         "bp": "blueprint_class",
+        "animbp": "animbp",
+        "animation_blueprint": "animbp",
         "dataasset": "data_asset",
         "data_asset": "data_asset",
+        "material": "material",
+        "mat": "material",
+        "behavior_tree": "behavior_tree",
+        "behaviortree": "behavior_tree",
+        "bt": "behavior_tree",
         "input_action": "input_action",
         "inputaction": "input_action",
         "input_mapping_context": "input_mapping_context",
         "inputmappingcontext": "input_mapping_context",
         "mapping_context": "input_mapping_context",
         "imc": "input_mapping_context",
+        "state_tree": "state_tree",
+        "statetree": "state_tree",
+        "control_rig": "control_rig",
+        "controlrig": "control_rig",
+        "niagara": "niagara",
+        "niagara_system": "niagara",
+        "eqs": "eqs",
+        "env_query": "eqs",
+        "sequencer": "sequencer",
+        "level_sequence": "sequencer",
+        "metasound": "metasound",
+        "meta_sound": "metasound",
+        "pcg": "pcg",
+        "motion_matching": "motion_matching",
+        "motionmatching": "motion_matching",
+        "ik_rig": "ik_rig",
+        "ikrig": "ik_rig",
     }
     resolved = aliases.get(asset_kind, asset_kind)
 
@@ -591,59 +567,96 @@ def asset_scaffold(request: AssetScaffoldRequest):
         return build_blueprint_class_scaffold(name=name, purpose=purpose, class_name=class_name)
     if resolved == "data_asset":
         return build_data_asset_scaffold(name=name, purpose=purpose, class_name=class_name)
+    if resolved == "animbp":
+        return build_animbp_scaffold(name=name, purpose=purpose, class_name=class_name)
+    if resolved == "material":
+        return build_material_scaffold(name=name, purpose=purpose)
+    if resolved == "behavior_tree":
+        return build_behavior_tree_scaffold(name=name, purpose=purpose)
     if resolved == "input_action":
         return build_input_action_scaffold(name=name, purpose=purpose)
     if resolved == "input_mapping_context":
         return build_input_mapping_context_scaffold(name=name, purpose=purpose)
+    if resolved == "state_tree":
+        return build_state_tree_scaffold(name=name, purpose=purpose)
+    if resolved == "control_rig":
+        return build_control_rig_scaffold(name=name, purpose=purpose)
+    if resolved == "niagara":
+        return build_niagara_scaffold(name=name, purpose=purpose)
+    if resolved == "eqs":
+        return build_eqs_scaffold(name=name, purpose=purpose)
+    if resolved == "sequencer":
+        return build_sequencer_scaffold(name=name, purpose=purpose)
+    if resolved == "metasound":
+        return build_metasound_scaffold(name=name, purpose=purpose)
+    if resolved == "pcg":
+        return build_pcg_scaffold(name=name, purpose=purpose)
+    if resolved == "motion_matching":
+        return build_motion_matching_scaffold(name=name, purpose=purpose)
+    if resolved == "ik_rig":
+        return build_ik_rig_scaffold(name=name, purpose=purpose)
 
-    return {"error": "Scaffolding currently supports blueprint_class, data_asset, input_action, and input_mapping_context."}
+    return {"error": "Scaffolding currently supports blueprint_class, animbp, data_asset, material, behavior_tree, input_action, input_mapping_context, state_tree, control_rig, niagara, eqs, sequencer, metasound, pcg, motion_matching, and ik_rig."}
 
 
 @app.post("/asset-edit-plan")
 def asset_edit_plan(request: AssetEditRequest):
-    selection = request.selection.strip()
-    change_request = request.change_request.strip()
-
-    if not selection:
-        return {"error": "Select an asset first."}
-    if not change_request:
-        return {"error": "Describe the change you want first."}
-
-    analysis = PROJECT_CACHE["analysis"]
-    if not analysis:
-        return {"error": "No project has been scanned yet."}
-
-    asset_matches = find_matching_assets(analysis["assets"], selection, limit=4)
-    if not asset_matches:
-        return {"error": "No matching scanned asset was found."}
-
-    asset = asset_matches[0]
-    family = asset.get("family", "")
-    asset_type = asset.get("asset_type", "")
-
-    details = build_asset_details(
-        selection=selection,
-        asset=asset,
-        files=analysis["files"],
-        assets=analysis["assets"],
-        blueprint_links=analysis["blueprint_links"],
-        family_summaries=summarize_specialized_assets(analysis["files"], analysis["assets"]),
+    return run_asset_action(
+        "asset_edit_plan",
+        analysis=PROJECT_CACHE["analysis"],
+        selection=request.selection,
+        change_request=request.change_request,
+        looks_like_rename_request=looks_like_rename_request,
+        looks_like_function_request=looks_like_function_request,
+        build_asset_rename_edit_plan=build_asset_rename_edit_plan,
+        build_data_asset_edit_plan=build_data_asset_edit_plan,
+        build_enhanced_input_edit_plan=build_enhanced_input_edit_plan,
+        build_behavior_tree_edit_plan=build_behavior_tree_edit_plan,
+        build_material_edit_plan=build_material_edit_plan,
+        build_animbp_edit_plan=build_animbp_edit_plan,
+        build_state_tree_edit_plan=build_state_tree_edit_plan,
+        build_control_rig_edit_plan=build_control_rig_edit_plan,
+        build_niagara_edit_plan=build_niagara_edit_plan,
+        build_eqs_edit_plan=build_eqs_edit_plan,
+        build_sequencer_edit_plan=build_sequencer_edit_plan,
+        build_metasound_edit_plan=build_metasound_edit_plan,
+        build_pcg_edit_plan=build_pcg_edit_plan,
+        build_motion_matching_edit_plan=build_motion_matching_edit_plan,
+        build_ik_rig_edit_plan=build_ik_rig_edit_plan,
+        build_blueprint_function_edit_plan=build_blueprint_function_edit_plan,
+        build_blueprint_variable_edit_plan=build_blueprint_variable_edit_plan,
     )
-    if looks_like_rename_request(change_request):
-        return build_asset_rename_edit_plan(asset, change_request, details)
-    if family == "data_asset" or asset_type == "data_asset":
-        return build_data_asset_edit_plan(asset, change_request, details)
-    if family == "enhanced_input" or asset_type in {"input_action", "input_mapping_context"}:
-        return build_enhanced_input_edit_plan(asset, change_request, details)
-    if family in {"behavior_tree", "blackboard"} or asset_type in {"behavior_tree", "blackboard"}:
-        return build_behavior_tree_edit_plan(asset, change_request, details)
-    if family in {"material", "material_instance"} or "material" in asset_type:
-        return build_material_edit_plan(asset, change_request, details)
-    if family in {"blueprint", "ui"} or "blueprint" in asset_type:
-        if looks_like_function_request(change_request):
-            return build_blueprint_function_edit_plan(asset, change_request, details)
-        return build_blueprint_variable_edit_plan(asset, change_request, details)
-    return {"error": "Controlled edit plans currently support rename planning plus DataAssets, Enhanced Input assets, Behavior Trees, Materials, and Blueprint variable/function planning first."}
+
+
+@app.post("/plugin/asset-edit-plan")
+def plugin_asset_edit_plan(request: PluginSelectionRequest):
+    selection = (request.selection_name or request.asset_path or request.class_name or "").strip()
+    change_request = (request.change_request or "").strip()
+    return run_asset_action(
+        "asset_edit_plan",
+        analysis=PROJECT_CACHE["analysis"],
+        selection=selection,
+        change_request=change_request,
+        looks_like_rename_request=looks_like_rename_request,
+        looks_like_function_request=looks_like_function_request,
+        build_asset_rename_edit_plan=build_asset_rename_edit_plan,
+        build_data_asset_edit_plan=build_data_asset_edit_plan,
+        build_enhanced_input_edit_plan=build_enhanced_input_edit_plan,
+        build_behavior_tree_edit_plan=build_behavior_tree_edit_plan,
+        build_material_edit_plan=build_material_edit_plan,
+        build_animbp_edit_plan=build_animbp_edit_plan,
+        build_state_tree_edit_plan=build_state_tree_edit_plan,
+        build_control_rig_edit_plan=build_control_rig_edit_plan,
+        build_niagara_edit_plan=build_niagara_edit_plan,
+        build_eqs_edit_plan=build_eqs_edit_plan,
+        build_sequencer_edit_plan=build_sequencer_edit_plan,
+        build_metasound_edit_plan=build_metasound_edit_plan,
+        build_pcg_edit_plan=build_pcg_edit_plan,
+        build_motion_matching_edit_plan=build_motion_matching_edit_plan,
+        build_ik_rig_edit_plan=build_ik_rig_edit_plan,
+        build_blueprint_function_edit_plan=build_blueprint_function_edit_plan,
+        build_blueprint_variable_edit_plan=build_blueprint_variable_edit_plan,
+    )
 
 
 @app.post("/plugin/selection-context")
@@ -663,19 +676,13 @@ def plugin_selection_context(request: PluginSelectionRequest):
 
     primary_term = selection_name or class_name or asset_path
     base_result = selection_analysis(SelectionRequest(selection=primary_term))
-
-    specialized_summary = None
-    summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
-    haystack = " ".join(lookup_terms).lower()
-    for summary in summaries.values():
-        title = summary.get("title", "").lower()
-        family_key = summary.get("family_key", "").lower()
-        if family_key in haystack or any(asset["name"].lower() in haystack for asset in summary.get("assets", [])):
-            specialized_summary = summary
-            break
-        if title and any(part in haystack for part in title.split()):
-            specialized_summary = summary
-            break
+    specialized_summary = run_asset_action(
+        "plugin_specialized_family",
+        analysis=analysis,
+        selection_name=selection_name,
+        class_name=class_name,
+        asset_path=asset_path,
+    )
 
     matched_files = search_files(
         analysis["files"],
@@ -698,61 +705,18 @@ def plugin_selection_context(request: PluginSelectionRequest):
 
 @app.post("/asset-deep-analysis")
 def asset_deep_analysis(request: DeepAssetAnalysisRequest):
-    analysis = PROJECT_CACHE["analysis"]
-    if not analysis:
-        return {"error": "No project has been scanned yet."}
-
-    asset_kind = request.asset_kind.strip().lower()
-    exported_text = (request.exported_text or "").strip()
-    selection_name = (request.selection_name or "").strip()
-    class_name = (request.class_name or "").strip()
-    asset_path = (request.asset_path or "").strip()
-    matched_asset = None
-
-    lookup_term = selection_name or asset_path
-    if lookup_term:
-        matches = find_matching_assets(analysis["assets"], lookup_term, limit=1)
-        matched_asset = matches[0] if matches else None
-
-    asset_kind = infer_deep_asset_kind(
-        asset=matched_asset,
-        selection_name=selection_name,
-        asset_path=asset_path,
-        asset_kind=asset_kind,
+    return run_asset_action(
+        "asset_deep_analysis",
+        analysis=PROJECT_CACHE["analysis"],
+        asset_kind=request.asset_kind,
+        exported_text=request.exported_text or "",
+        selection_name=request.selection_name or "",
+        class_name=request.class_name or "",
+        asset_path=request.asset_path or "",
+        source=request.source or "web",
+        include_ai_summary=bool(os.getenv("OPENAI_API_KEY")),
+        summarize_with_llm=summarize_deep_asset_with_llm,
     )
-
-    if not asset_kind:
-        return {"error": "Asset kind could not be inferred. Pick a deep asset kind or provide a clearer selected asset name/path."}
-
-    summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
-    family_aliases = {
-        "blueprint": "blueprints",
-        "animbp": "animbps",
-        "animation_blueprint": "animbps",
-        "behavior_tree": "behavior_trees",
-        "material": "materials",
-        "enhanced_input": "enhanced_input",
-        "input": "enhanced_input",
-    }
-    family_summary = summaries.get(family_aliases.get(asset_kind, asset_kind))
-
-    result = analyze_deep_asset(
-        asset_kind=asset_kind,
-        exported_text=exported_text,
-        selection_name=selection_name or (matched_asset or {}).get("name", ""),
-        class_name=class_name,
-        family_summary=family_summary,
-    )
-    result["asset_path"] = asset_path or (matched_asset or {}).get("path", "")
-    result["resolved_asset_kind"] = asset_kind
-    if matched_asset:
-        result["resolved_asset_name"] = matched_asset.get("name", "")
-    result["source"] = request.source or "web"
-
-    if os.getenv("OPENAI_API_KEY") and exported_text:
-        result["ai_summary"] = summarize_deep_asset_with_llm(result, exported_text)
-
-    return result
 
 
 @app.post("/explain-blueprint-nodes")
@@ -1120,6 +1084,99 @@ Recommended starter mappings:
     }
 
 
+def build_material_scaffold(name, purpose=""):
+    clean_name = sanitize_asset_name(name, "M_")
+    description = purpose or "Gameplay-facing base material"
+
+    outline = f"""Asset: {clean_name}
+Type: Material
+Purpose: {description}
+
+Recommended starter parameters:
+- BaseColorTint (Vector Parameter)
+- Roughness (Scalar Parameter)
+- Metallic (Scalar Parameter)
+- NormalStrength (Scalar Parameter, only if needed)
+
+Recommended starter graph shape:
+- Base Color <- Vector Parameter or tinted texture sample
+- Roughness <- Scalar Parameter
+- Metallic <- Scalar Parameter
+- Keep the first version cheap, readable, and easy to instance
+"""
+
+    steps = [
+        f"Create a Material asset named `{clean_name}` under `Content/Materials`.",
+        "Start with parameterized scalar/vector values so instances and gameplay code can tune the look later.",
+        "Keep the first version visually simple before adding layered functions, switches, or runtime-heavy math.",
+        "If only one actor variant needs tuning, consider pairing this with a Material Instance immediately after the base material exists.",
+    ]
+
+    return {
+        "asset_kind": "material",
+        "title": f"{clean_name} Material Scaffold",
+        "summary": "This scaffold gives you a safe starter plan for a simple parameterized material.",
+        "recommended_asset_name": clean_name,
+        "recommended_asset_path": f"Content/Materials/{clean_name}",
+        "steps": steps,
+        "files": [
+            {
+                "label": "Material Outline",
+                "language": "text",
+                "content": outline,
+            }
+        ],
+    }
+
+
+def build_behavior_tree_scaffold(name, purpose=""):
+    clean_name = sanitize_asset_name(name, "BT_")
+    blackboard_name = sanitize_asset_name(name, "BB_")
+    description = purpose or "AI decision flow"
+
+    outline = f"""Asset: {clean_name}
+Type: Behavior Tree
+Purpose: {description}
+Blackboard: {blackboard_name}
+
+Recommended starter flow:
+- Root
+  - Selector
+    - Sequence: Combat/Primary goal
+    - Sequence: Chase or Move To target
+    - Sequence: Patrol or Idle fallback
+
+Recommended starter Blackboard keys:
+- TargetActor (Object)
+- TargetLocation (Vector)
+- HasLineOfSight (Bool)
+- IsAlerted (Bool)
+"""
+
+    steps = [
+        f"Create a Blackboard asset named `{blackboard_name}` under `Content/AI` first.",
+        f"Create a Behavior Tree asset named `{clean_name}` under `Content/AI` and attach `{blackboard_name}`.",
+        "Start with one selector and a few small sequences before adding many decorators or services.",
+        "Keep ownership clear by deciding which AIController, tasks, and Blackboard keys are responsible for each branch.",
+    ]
+
+    return {
+        "asset_kind": "behavior_tree",
+        "title": f"{clean_name} Behavior Tree Scaffold",
+        "summary": "This scaffold gives you a safe starter plan for a simple Behavior Tree and Blackboard pair.",
+        "recommended_asset_name": clean_name,
+        "recommended_asset_path": f"Content/AI/{clean_name}",
+        "steps": steps,
+        "files": [
+            {
+                "label": "Behavior Tree Outline",
+                "language": "text",
+                "content": outline,
+            }
+        ],
+    }
+
+
 def sanitize_asset_name(name, prefix):
     raw = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name.strip())
     raw = "_".join(part for part in raw.split("_") if part)
@@ -1128,6 +1185,282 @@ def sanitize_asset_name(name, prefix):
     if not raw.lower().startswith(prefix.lower()):
         raw = f"{prefix}{raw}"
     return raw
+
+
+def build_text_asset_scaffold(asset_kind, name, prefix, folder, title_suffix, purpose="", outline_lines=None, steps=None, extra=None):
+    clean_name = sanitize_asset_name(name, prefix)
+    outline = "\n".join(outline_lines or [])
+    payload = {
+        "asset_kind": asset_kind,
+        "title": f"{clean_name} {title_suffix} Scaffold",
+        "summary": f"This scaffold gives you a safe starter plan for a {title_suffix.lower()} asset.",
+        "recommended_asset_name": clean_name,
+        "recommended_asset_path": f"{folder}/{clean_name}",
+        "steps": steps or [],
+        "files": [
+            {
+                "label": f"{title_suffix} Outline",
+                "language": "text",
+                "content": outline,
+            }
+        ],
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def build_generic_specialized_edit_plan(
+    asset,
+    change_request,
+    details,
+    *,
+    asset_kind,
+    summary_phrase,
+    suggested_focus_name,
+    suggested_focus_kind,
+    fields_to_check,
+    risks,
+    validation_steps,
+):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    validation = list(validation_steps)
+    if owner != "None":
+        validation.insert(1, f"Inspect `{owner}` first, because it looks like the strongest runtime owner for this asset.")
+
+    return {
+        "asset_kind": asset_kind,
+        "title": f"Edit Plan for {asset_name}",
+        "summary": f"This is a controlled edit plan for {summary_phrase} in `{asset_name}` without guessing at runtime ownership or editor-side side effects.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "suggested_node_kind": suggested_focus_kind,
+        "suggested_node_name": suggested_focus_name,
+        "what_to_change": [
+            f"Requested change: {change_request}",
+            f"Start with the smallest possible `{suggested_focus_kind}` change, using a focus like `{suggested_focus_name}`.",
+            "Keep the change localized first so ownership stays obvious and validation stays cheap.",
+            "Validate the runtime trigger path before widening the scope of the asset edit.",
+        ],
+        "fields_to_check": fields_to_check,
+        "risks": risks[:5],
+        "validation_steps": validation,
+    }
+
+
+def build_animbp_scaffold(name, purpose="", class_name=""):
+    clean_name = sanitize_asset_name(name, "ABP_")
+    parent_class = class_name or "AnimInstance"
+    outline_lines = [
+        f"Asset: {clean_name}",
+        "Type: Animation Blueprint",
+        f"Parent Class: {parent_class}",
+        f"Purpose: {purpose or 'Character animation state machine'}",
+        "",
+        "Recommended starter setup:",
+        "- Variables: Speed, bIsInAir, bIsMoving, AimYawOrPitch",
+        "- State machine: Idle/Locomotion, Jump/Fall, Action overlay if needed",
+        "- Blend spaces or montage hooks only after the base locomotion path works",
+    ]
+    steps = [
+        f"Create an Animation Blueprint named `{clean_name}` under `Content/Animation`.",
+        f"Use `{parent_class}` or your project anim instance base class as the parent.",
+        "Bridge only the minimum movement/combat variables from character code into the AnimBP first.",
+        "Start with a small locomotion state machine before layering montages, additive poses, or aim offsets.",
+    ]
+    return build_text_asset_scaffold("animbp", name, "ABP_", "Content/Animation", "Animation Blueprint", purpose, outline_lines, steps)
+
+
+def build_state_tree_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'ST_')}",
+        "Type: StateTree",
+        f"Purpose: {purpose or 'Hierarchical gameplay state flow'}",
+        "",
+        "Recommended starter states:",
+        "- Root",
+        "- Default/Idle",
+        "- Active/Primary goal",
+        "- Recovery/Fallback",
+        "",
+        "Recommended starter graph pieces:",
+        "- Shared parameters for actor/controller references",
+        "- One evaluator for live state inputs",
+        "- Small tasks per state instead of one large task",
+    ]
+    steps = [
+        "Create the StateTree asset under `Content/AI` or `Content/Gameplay/StateTrees`.",
+        "Add only a few explicit states first so ownership and transitions stay readable.",
+        "Centralize shared input through parameters/evaluators before duplicating checks across tasks.",
+        "Verify the owning component or controller starts and updates this StateTree in the target runtime path.",
+    ]
+    return build_text_asset_scaffold("state_tree", name, "ST_", "Content/Gameplay/StateTrees", "StateTree", purpose, outline_lines, steps)
+
+
+def build_control_rig_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'CR_')}",
+        "Type: Control Rig",
+        f"Purpose: {purpose or 'Procedural rig or pose control'}",
+        "",
+        "Recommended starter rig pieces:",
+        "- Controls for the smallest useful body part or prop rig",
+        "- Hierarchy access scoped to the driven bones",
+        "- Forward solve first, then optional backward solve only if truly needed",
+    ]
+    steps = [
+        "Create the Control Rig asset under `Content/Animation/Rigs`.",
+        "Start with a tiny control set and one clear solve direction before expanding the rig graph.",
+        "Keep runtime and editor-only rig assumptions separate if the rig will be reused in gameplay.",
+        "Validate which skeletal mesh, anim pipeline, or sequencer flow will own this rig before adding more controls.",
+    ]
+    return build_text_asset_scaffold("control_rig", name, "CR_", "Content/Animation/Rigs", "Control Rig", purpose, outline_lines, steps)
+
+
+def build_niagara_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'NS_')}",
+        "Type: Niagara System",
+        f"Purpose: {purpose or 'Gameplay VFX system'}",
+        "",
+        "Recommended starter emitters:",
+        "- One emitter with clear spawn/update ownership",
+        "- Parameter inputs for color/intensity/rate only if the effect needs runtime tuning",
+        "- One renderer path before layering extra emitters",
+    ]
+    steps = [
+        "Create the Niagara System under `Content/VFX`.",
+        "Start with one emitter and one renderer so the effect stays debuggable.",
+        "Parameterize only the values gameplay code or designers truly need to drive.",
+        "Confirm the owning gameplay event, component, or weapon path that will spawn or attach this system.",
+    ]
+    return build_text_asset_scaffold("niagara", name, "NS_", "Content/VFX", "Niagara System", purpose, outline_lines, steps)
+
+
+def build_eqs_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'EQS_')}",
+        "Type: EQS Query",
+        f"Purpose: {purpose or 'AI position or target query'}",
+        "",
+        "Recommended starter layout:",
+        "- One generator",
+        "- Two or three tests max",
+        "- A clear query context for querier, target, or world source",
+    ]
+    steps = [
+        "Create the EQS asset under `Content/AI/Queries`.",
+        "Start with one generator and the smallest scoring set that answers the gameplay question.",
+        "Make context ownership explicit before stacking many distance, visibility, or path tests.",
+        "Validate the AIController or behavior logic that requests the query and consumes the result.",
+    ]
+    return build_text_asset_scaffold("eqs", name, "EQS_", "Content/AI/Queries", "EQS Query", purpose, outline_lines, steps)
+
+
+def build_sequencer_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'LS_')}",
+        "Type: Level Sequence",
+        f"Purpose: {purpose or 'Cinematic or scripted presentation flow'}",
+        "",
+        "Recommended starter tracks:",
+        "- Camera cut track",
+        "- One transform or animation track",
+        "- Event track only if gameplay must react to timing",
+    ]
+    steps = [
+        "Create the Level Sequence under `Content/Cinematics`.",
+        "Bind only the minimum actors/cameras needed for the first pass.",
+        "Keep gameplay-critical logic out of the sequence until the presentation path is stable.",
+        "Validate the actor/player that triggers the sequence and the exact runtime conditions around it.",
+    ]
+    return build_text_asset_scaffold("sequencer", name, "LS_", "Content/Cinematics", "Level Sequence", purpose, outline_lines, steps)
+
+
+def build_metasound_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'MS_')}",
+        "Type: MetaSound",
+        f"Purpose: {purpose or 'Reactive or procedural audio'}",
+        "",
+        "Recommended starter graph:",
+        "- Graph Input for one or two runtime parameters",
+        "- One playback/oscillator path",
+        "- One envelope or shaping stage",
+        "- Graph Output to audio",
+    ]
+    steps = [
+        "Create the MetaSound asset under `Content/Audio/MetaSounds`.",
+        "Start with one trigger path and one output path before layering modulation.",
+        "Name runtime parameters carefully so audio code and content stay in sync.",
+        "Validate which audio component or gameplay event will own this sound at runtime.",
+    ]
+    return build_text_asset_scaffold("metasound", name, "MS_", "Content/Audio/MetaSounds", "MetaSound", purpose, outline_lines, steps)
+
+
+def build_pcg_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'PCG_')}",
+        "Type: PCG Graph",
+        f"Purpose: {purpose or 'Procedural environment or content generation'}",
+        "",
+        "Recommended starter graph:",
+        "- One source input",
+        "- One filter stage",
+        "- One spawn/output stage",
+        "- A named parameter or attribute only if generation must vary at runtime",
+    ]
+    steps = [
+        "Create the PCG graph under `Content/World/PCG`.",
+        "Start with one source and one output path so generation ownership stays obvious.",
+        "Add filtering before adding multiple spawn branches.",
+        "Validate which actor or PCG component owns generation timing and cleanup.",
+    ]
+    return build_text_asset_scaffold("pcg", name, "PCG_", "Content/World/PCG", "PCG Graph", purpose, outline_lines, steps)
+
+
+def build_motion_matching_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'MM_')}",
+        "Type: Motion Matching Asset",
+        f"Purpose: {purpose or 'Pose-search driven locomotion setup'}",
+        "",
+        "Recommended starter setup:",
+        "- Pose database with a narrow movement focus",
+        "- Clear trajectory input expectations",
+        "- One chooser/query path before adding many state branches",
+    ]
+    steps = [
+        "Create the Motion Matching asset under `Content/Animation/MotionMatching`.",
+        "Start with a small pose database centered on one locomotion scenario.",
+        "Confirm the trajectory source and movement-state ownership before broadening the database.",
+        "Validate the animation selection path together with the owning character locomotion code.",
+    ]
+    return build_text_asset_scaffold("motion_matching", name, "MM_", "Content/Animation/MotionMatching", "Motion Matching", purpose, outline_lines, steps)
+
+
+def build_ik_rig_scaffold(name, purpose=""):
+    outline_lines = [
+        f"Asset: {sanitize_asset_name(name, 'IKR_')}",
+        "Type: IK Rig",
+        f"Purpose: {purpose or 'IK setup or retargeting support'}",
+        "",
+        "Recommended starter setup:",
+        "- Explicit chains for the minimum limbs or props you need",
+        "- One solver path",
+        "- Goals/effectors named after the driven body parts",
+    ]
+    steps = [
+        "Create the IK Rig asset under `Content/Animation/IK`.",
+        "Define only the required chains and goals first so debugging stays manageable.",
+        "Keep retargeting assumptions explicit if multiple skeletons or profiles are involved.",
+        "Validate which skeletal mesh, rig, or anim pipeline path owns this IK setup.",
+    ]
+    return build_text_asset_scaffold("ik_rig", name, "IKR_", "Content/Animation/IK", "IK Rig", purpose, outline_lines, steps)
 
 
 def build_data_asset_edit_plan(asset, change_request, details):
@@ -1402,6 +1735,329 @@ def build_material_edit_plan(asset, change_request, details):
     }
 
 
+def build_animbp_edit_plan(asset, change_request, details):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    lowered = change_request.lower()
+    state_name = infer_animbp_state_name(change_request)
+    variable_name = infer_animbp_variable_name(change_request)
+
+    what_to_change = [
+        f"Requested change: {change_request}",
+        f"Make the smallest AnimBP-side change first, such as a state/transition named `{state_name}` or a bridged variable like `{variable_name}`.",
+        "Decide whether the requested behavior belongs in state-machine flow, montage/notifies, or character-to-anim variable bridging before touching multiple graphs.",
+        "Keep gameplay authority in character/controller code and use the AnimBP to translate that state into animation behavior.",
+    ]
+
+    fields_to_check = [
+        "Anim instance variables that mirror movement, combat, locomotion, or action state",
+        "State machine names, transition rules, and any blend settings the change depends on",
+        "Montage, slot, and notify usage if the request affects attacks, reactions, or one-shot actions",
+        "Whether the owning character or pawn updates the needed variables before the AnimBP reads them",
+        "Whether the same state already exists in the character, ability, or movement code",
+    ]
+
+    risks = [
+        "AnimBP changes can look correct in-editor but fail at runtime if the character never updates the bridged variables.",
+        "Duplicating gameplay state in both the character and the AnimBP can create drift and hard-to-debug timing bugs.",
+        "Transition rule changes can have broad side effects across locomotion or combat graphs, especially when blends and montages interact.",
+    ]
+    if "montage" in lowered or "notify" in lowered:
+        risks.append("Montage or notify changes can desync gameplay timing if damage windows, FX, or movement locks rely on them.")
+    if "turn" in lowered or "aim" in lowered or "speed" in lowered:
+        risks.append("Locomotion and aim-state changes often need validation across multiple movement speeds and edge-case direction changes.")
+
+    validation = [
+        f"Open `{asset_name}` and make the smallest state-machine or variable-bridge change possible first.",
+        "Inspect the owning character, pawn, or anim instance code to confirm where the driving variables are written.",
+        "Use PIE plus animation debug tools to watch the variable values and active states while reproducing the target behavior.",
+        "Test idle, locomotion, and any combat/action transitions that touch the same graph so the change does not only work in one path.",
+        "If montages or notifies are involved, verify gameplay events still fire at the expected frame/timing.",
+    ]
+    if owner != "None":
+        validation.insert(1, f"Inspect `{owner}` first, because it looks like the strongest runtime owner for this animation flow.")
+
+    return {
+        "asset_kind": "animbp_edit",
+        "title": f"Edit Plan for {asset_name}",
+        "summary": f"This is a controlled edit plan for changing animation flow in `{asset_name}` without guessing at gameplay-to-animation ownership.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "suggested_node_kind": "state_or_transition",
+        "suggested_node_name": state_name,
+        "suggested_parameter_name": variable_name,
+        "suggested_parameter_type": "AnimBP Variable",
+        "what_to_change": what_to_change,
+        "fields_to_check": fields_to_check,
+        "risks": risks[:5],
+        "validation_steps": validation,
+    }
+
+
+def build_state_tree_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="state_tree_edit",
+        summary_phrase="changing StateTree flow",
+        suggested_focus_name=infer_state_tree_focus_name(change_request),
+        suggested_focus_kind="state_or_task",
+        fields_to_check=[
+            "State names and transition conditions touched by the change",
+            "Shared parameters and evaluator inputs the state logic depends on",
+            "Task ownership and whether the work belongs in the tree versus runtime code",
+            "Which controller/component starts and updates this StateTree",
+        ],
+        risks=[
+            "StateTree edits can duplicate gameplay transitions that already exist in code if ownership is not checked first.",
+            "Evaluator and task logic can become hard to debug if too much state is inferred indirectly.",
+            "Transition changes can affect multiple gameplay branches even when the visual edit looks small.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and make the smallest state or task change possible first.",
+            "Inspect the runtime owner to confirm where shared state is written before the tree evaluates it.",
+            "Test at least the target branch plus one fallback branch so the change does not only work in one happy path.",
+            "Use debug tooling or logging to watch the active state and transition conditions while reproducing the behavior.",
+        ],
+    )
+
+
+def build_control_rig_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="control_rig_edit",
+        summary_phrase="adjusting procedural rig behavior",
+        suggested_focus_name=infer_control_rig_focus_name(change_request),
+        suggested_focus_kind="control_or_solver",
+        fields_to_check=[
+            "Which controls, bones, or chains the edit should affect",
+            "Whether the change belongs in forward solve, backward solve, or setup logic",
+            "How the rig is consumed by animation, sequencer, or runtime components",
+            "Any retarget or hierarchy assumptions that could break when the change lands",
+        ],
+        risks=[
+            "Control Rig edits can look correct in-editor but fail in runtime or cinematic paths if ownership differs.",
+            "Solver changes can affect a wider part of the pose than expected.",
+            "Hierarchy or naming mismatches can quietly break driven controls and bones.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and isolate the smallest control or solver change first.",
+            "Validate the driven bones and control names before expanding the graph edit.",
+            "Test the rig in the exact animation or sequence path where it matters, not just in isolation.",
+            "Confirm the solve direction and order still match the intended procedural animation flow.",
+        ],
+    )
+
+
+def build_niagara_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="niagara_edit",
+        summary_phrase="changing Niagara VFX behavior",
+        suggested_focus_name=infer_niagara_focus_name(change_request),
+        suggested_focus_kind="emitter_or_parameter",
+        fields_to_check=[
+            "Emitter ownership and whether the change belongs in spawn, update, or renderer setup",
+            "Parameter names and whether gameplay code drives them at runtime",
+            "Attachment/spawn location assumptions and cleanup behavior",
+            "Whether the system is reused broadly and could affect many gameplay paths",
+        ],
+        risks=[
+            "Niagara edits can silently drift from gameplay expectations if parameter names or spawn assumptions change.",
+            "Emitter or renderer changes may increase runtime cost in every place the effect is used.",
+            "Short-lived visual fixes can mask cleanup, pooling, or attachment problems.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and make one emitter or parameter change at a time.",
+            "Search gameplay code for runtime Niagara variable writes before assuming the editor value will win.",
+            "Test the effect in the exact gameplay event that owns it so timing and attachment stay honest.",
+            "Compare editor preview and PIE/runtime behavior to catch spawn/setup differences.",
+        ],
+    )
+
+
+def build_eqs_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="eqs_edit",
+        summary_phrase="changing EQS query behavior",
+        suggested_focus_name=infer_eqs_focus_name(change_request),
+        suggested_focus_kind="generator_or_test",
+        fields_to_check=[
+            "Generator ownership and whether the query should produce points, actors, or other items",
+            "Tests, weights, and contexts touched by the change",
+            "Which AIController, task, or behavior requests this query",
+            "How the result is consumed after scoring completes",
+        ],
+        risks=[
+            "EQS edits can look small but radically change AI decision quality if contexts or scores drift.",
+            "More tests can add cost quickly when the query already runs often.",
+            "Queries may appear random when the generator/context pair is misaligned with gameplay assumptions.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and add or adjust one generator/test at a time.",
+            "Validate the query context and consuming AI behavior together before widening the change.",
+            "Inspect scored results in the intended scenario so you can see why the winning item changed.",
+            "Test at least one edge case where the AI has fewer good candidate results.",
+        ],
+    )
+
+
+def build_sequencer_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="sequencer_edit",
+        summary_phrase="changing Sequencer timing or presentation",
+        suggested_focus_name=infer_sequencer_focus_name(change_request),
+        suggested_focus_kind="track_or_event",
+        fields_to_check=[
+            "Track, section, and binding ownership for the requested change",
+            "Which event keys or timing windows gameplay depends on",
+            "Whether the change belongs in cinematic presentation or in gameplay code",
+            "Camera and actor bindings that could break when assets move or rename",
+        ],
+        risks=[
+            "Sequencer edits can hide gameplay dependencies inside presentation timing.",
+            "Track timing changes can ripple into animation, audio, or camera behavior together.",
+            "Bindings can fail silently if actors/assets differ between editor and runtime contexts.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and make one track or event change at a time.",
+            "Confirm the same actors and cameras are bound in the runtime scenario you care about.",
+            "Play through the full sequence to verify downstream timing still lines up.",
+            "If gameplay reacts to sequence events, test both the sequence and the gameplay response together.",
+        ],
+    )
+
+
+def build_metasound_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="metasound_edit",
+        summary_phrase="changing MetaSound graph behavior",
+        suggested_focus_name=infer_metasound_focus_name(change_request),
+        suggested_focus_kind="graph_input_or_audio_node",
+        fields_to_check=[
+            "Graph inputs and whether code/gameplay drives them at runtime",
+            "Trigger/playback flow and where timing starts",
+            "Shaping, mix, or envelope stages touched by the change",
+            "Whether the MetaSound is reused by many actors or one narrow event path",
+        ],
+        risks=[
+            "MetaSound parameter name mismatches can make runtime audio changes fail silently.",
+            "Graph edits can change loudness, timing, or layering in more places than expected if the sound is reused.",
+            "Trigger and delay changes can create subtle gameplay/audio sync issues.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and adjust one graph input or node cluster at a time.",
+            "Search for runtime parameter writes before renaming or repurposing any exposed input.",
+            "Test the audio in the exact gameplay event flow where timing matters.",
+            "Compare editor preview and runtime playback so component-level differences do not surprise you.",
+        ],
+    )
+
+
+def build_pcg_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="pcg_edit",
+        summary_phrase="changing PCG generation behavior",
+        suggested_focus_name=infer_pcg_focus_name(change_request),
+        suggested_focus_kind="source_filter_or_spawn_stage",
+        fields_to_check=[
+            "Generation source inputs and ownership of source actors/data",
+            "Filter stages, attributes, and density controls affected by the change",
+            "Spawn/output stages and cleanup expectations",
+            "Which PCG component or world-generation path owns this graph",
+        ],
+        risks=[
+            "PCG edits can explode output count or cost if spawn/filter balance drifts.",
+            "Generation ownership can become unclear when multiple actors or systems trigger the same graph.",
+            "Small attribute/filter changes can have broad visual impact across a level.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and change one source/filter/spawn stage at a time.",
+            "Validate the owning PCG component or trigger path before judging the graph in isolation.",
+            "Inspect generated output count and placement, not just whether something spawned.",
+            "Test cleanup/regeneration behavior if this graph can run more than once.",
+        ],
+    )
+
+
+def build_motion_matching_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="motion_matching_edit",
+        summary_phrase="changing motion-matching selection behavior",
+        suggested_focus_name=infer_motion_matching_focus_name(change_request),
+        suggested_focus_kind="pose_database_or_query_input",
+        fields_to_check=[
+            "Pose database coverage and whether the requested behavior belongs in this database",
+            "Trajectory/query inputs that drive selection quality",
+            "Chooser/scoring assumptions touched by the change",
+            "Which locomotion state and character code path feed the matcher",
+        ],
+        risks=[
+            "Motion Matching edits can make selection noisy if trajectory inputs and pose coverage drift apart.",
+            "Pose database changes may affect many locomotion states at once.",
+            "Scoring tweaks can appear fine in one speed range but fail in turns, stops, or transitions.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and make the smallest pose/query change possible first.",
+            "Confirm the owning locomotion code still feeds the expected trajectory and state inputs.",
+            "Test multiple movement speeds and direction changes, not just one showcase path.",
+            "Watch debug data for pose choice stability instead of relying only on visible animation quality.",
+        ],
+    )
+
+
+def build_ik_rig_edit_plan(asset, change_request, details):
+    return build_generic_specialized_edit_plan(
+        asset,
+        change_request,
+        details,
+        asset_kind="ik_rig_edit",
+        summary_phrase="changing IK Rig or retarget behavior",
+        suggested_focus_name=infer_ik_rig_focus_name(change_request),
+        suggested_focus_kind="chain_goal_or_solver",
+        fields_to_check=[
+            "Driven chains and goals touched by the change",
+            "Whether the change belongs in chain setup, goal placement, solver tuning, or retarget settings",
+            "Which skeleton/mesh pair owns this rig configuration",
+            "Any retarget profile assumptions that depend on the current setup",
+        ],
+        risks=[
+            "IK Rig edits can fail subtly when chain names, skeleton assumptions, or retarget profiles drift apart.",
+            "Solver changes may affect pose stability more broadly than the local edit suggests.",
+            "A rig can appear correct in one animation path but fail in another with different pose inputs.",
+        ],
+        validation_steps=[
+            f"Open `{asset.get('name', '')}` and isolate one chain, goal, or solver change first.",
+            "Validate the skeleton and mesh assumptions before widening the edit.",
+            "Test the rig in the exact retarget or animation path that depends on it.",
+            "Check both rest and exaggerated poses so solver tuning remains stable.",
+        ],
+    )
+
+
 def build_blueprint_variable_edit_plan(asset, change_request, details):
     asset_name = asset.get("name", "")
     asset_path = asset.get("path", "")
@@ -1608,6 +2264,38 @@ def infer_blueprint_function_name(change_request):
     return "HandleRequestedAction"
 
 
+def infer_animbp_state_name(change_request):
+    lowered = (change_request or "").lower()
+    if "jump" in lowered:
+        return "JumpOrAirborne"
+    if "fall" in lowered:
+        return "Falling"
+    if "land" in lowered:
+        return "Landing"
+    if "attack" in lowered or "melee" in lowered:
+        return "Attack"
+    if "aim" in lowered:
+        return "AimOffset"
+    if "turn" in lowered:
+        return "TurnInPlace"
+    return "RequestedState"
+
+
+def infer_animbp_variable_name(change_request):
+    lowered = (change_request or "").lower()
+    if "speed" in lowered:
+        return "Speed"
+    if "jump" in lowered or "fall" in lowered or "air" in lowered:
+        return "bIsInAir"
+    if "attack" in lowered or "melee" in lowered:
+        return "bIsAttacking"
+    if "aim" in lowered:
+        return "AimYawOrPitch"
+    if "turn" in lowered:
+        return "TurnOffset"
+    return "bRequestedAnimState"
+
+
 def infer_rename_target(change_request, fallback_name):
     text = (change_request or "").strip()
     quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', text)
@@ -1697,6 +2385,107 @@ def infer_behavior_tree_node_name(change_request, node_kind):
         "Blackboard Key Change": "BB_",
     }.get(node_kind, "BTTask_")
     return f"{prefix}{stem}"
+
+
+def infer_state_tree_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "patrol" in lowered:
+        return "PatrolState"
+    if "combat" in lowered or "attack" in lowered:
+        return "CombatState"
+    if "alert" in lowered:
+        return "AlertTransition"
+    return "RequestedStateFlow"
+
+
+def infer_control_rig_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "hand" in lowered or "arm" in lowered:
+        return "HandControl"
+    if "foot" in lowered or "leg" in lowered:
+        return "FootIKSolver"
+    if "spine" in lowered:
+        return "SpineControl"
+    return "RequestedRigControl"
+
+
+def infer_niagara_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "color" in lowered or "tint" in lowered:
+        return "ColorParameter"
+    if "smoke" in lowered:
+        return "SmokeEmitter"
+    if "trail" in lowered:
+        return "TrailEmitter"
+    if "impact" in lowered:
+        return "ImpactBurst"
+    return "RequestedEmitterChange"
+
+
+def infer_eqs_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "cover" in lowered:
+        return "CoverScoreTest"
+    if "target" in lowered:
+        return "TargetSelectionTest"
+    if "distance" in lowered:
+        return "DistanceFilter"
+    return "RequestedQueryAdjustment"
+
+
+def infer_sequencer_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "camera" in lowered:
+        return "CameraTrack"
+    if "event" in lowered:
+        return "EventTrack"
+    if "fade" in lowered:
+        return "FadeSection"
+    return "RequestedSequenceTrack"
+
+
+def infer_metasound_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "pitch" in lowered:
+        return "PitchInput"
+    if "volume" in lowered or "loud" in lowered:
+        return "VolumeEnvelope"
+    if "loop" in lowered:
+        return "LoopTrigger"
+    return "RequestedAudioNode"
+
+
+def infer_pcg_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "density" in lowered:
+        return "DensityFilter"
+    if "scatter" in lowered or "spawn" in lowered:
+        return "ScatterSpawnStage"
+    if "slope" in lowered:
+        return "SlopeFilter"
+    return "RequestedGenerationStage"
+
+
+def infer_motion_matching_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "turn" in lowered:
+        return "TurnDatabase"
+    if "stop" in lowered:
+        return "StopPoseQuery"
+    if "sprint" in lowered or "run" in lowered:
+        return "SprintTrajectoryInput"
+    return "RequestedPoseSelection"
+
+
+def infer_ik_rig_focus_name(change_request):
+    lowered = (change_request or "").lower()
+    if "hand" in lowered or "arm" in lowered:
+        return "ArmChainGoal"
+    if "foot" in lowered or "leg" in lowered:
+        return "FootChainGoal"
+    if "retarget" in lowered:
+        return "RetargetProfile"
+    return "RequestedIKChain"
 
 
 def chunk_text(text, chunk_size=7000, overlap=400):
