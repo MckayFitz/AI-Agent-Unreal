@@ -1,4 +1,12 @@
-def search_files(files, query: str, max_results: int = 5):
+from app.search_index import make_snippet, search_indexed_files
+
+
+def search_files(files, query: str, max_results: int = 5, index_data=None):
+    if index_data:
+        indexed_results = search_indexed_files(files, index_data, query, max_results=max_results)
+        if indexed_results:
+            return indexed_results
+
     terms = [term.lower() for term in query.split() if term.strip()]
     query_lower = query.lower().strip()
     matches = []
@@ -34,16 +42,3 @@ def search_files(files, query: str, max_results: int = 5):
 
     matches.sort(key=lambda item: item["score"], reverse=True)
     return matches[:max_results]
-
-
-def make_snippet(content: str, query: str, window: int = 500):
-    content_lower = content.lower()
-    query_lower = query.lower()
-
-    index = content_lower.find(query_lower)
-    if index == -1:
-        return content[:window].strip()
-
-    start = max(0, index - window // 2)
-    end = min(len(content), index + window // 2)
-    return content[start:end].strip()

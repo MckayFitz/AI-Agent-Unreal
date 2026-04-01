@@ -12,7 +12,33 @@ from openai import OpenAI
 
 from app.file_indexer import scan_project
 from app.code_reader import search_files
-from app.prompts import SYSTEM_PROMPT
+from app.search_index import build_search_index
+from app.prompts import (
+    CRASH_LOG_SYSTEM_PROMPT,
+    DEEP_ASSET_ANALYSIS_SYSTEM_PROMPT,
+    FILE_EXPLAIN_SUMMARY_PROMPT,
+    FILE_EXPLAIN_SYSTEM_PROMPT,
+    OUTPUT_LOG_SYSTEM_PROMPT,
+    SPECIALIZED_FAMILY_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    TASK_WORKFLOW_SYSTEM_PROMPT,
+)
+from app.ue_analysis import (
+    analyze_deep_asset,
+    analyze_reflection_text,
+    build_file_explanation,
+    build_asset_details,
+    build_folder_summary,
+    build_project_analysis,
+    build_dependency_map,
+    explain_blueprint_nodes,
+    find_matching_assets,
+    find_references,
+    generate_code_suggestions,
+    infer_deep_asset_kind,
+    summarize_specialized_assets,
+    build_task_workflow,
+)
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 env_path = os.path.join(BASE_DIR, ".env")
@@ -26,7 +52,12 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 PROJECT_CACHE = {
     "project_path": None,
-    "files": []
+    "files": [],
+    "assets": [],
+    "analysis": None,
+    "conversation_history": [],
+    "current_focus": None,
+    "search_index": None,
 }
 
 
@@ -42,6 +73,81 @@ class ErrorRequest(BaseModel):
     error_text: str
 
 
+class ReferenceRequest(BaseModel):
+    symbol: str
+
+
+class FileRequest(BaseModel):
+    path: str
+    mode: str = "beginner"
+
+
+class BlueprintLinkRequest(BaseModel):
+    class_name: str
+
+
+class SelectionRequest(BaseModel):
+    selection: str
+
+
+class BlueprintNodeRequest(BaseModel):
+    nodes_text: str
+
+
+class FolderRequest(BaseModel):
+    folder_path: str
+
+
+class TextRequest(BaseModel):
+    text: str
+
+
+class ReflectionRequest(BaseModel):
+    path: str | None = None
+    text: str | None = None
+
+
+class TaskRequest(BaseModel):
+    goal: str
+
+
+class AssetFamilyRequest(BaseModel):
+    family: str
+
+
+class AssetDetailRequest(BaseModel):
+    selection: str
+
+
+class AssetScaffoldRequest(BaseModel):
+    asset_kind: str
+    name: str
+    purpose: str | None = None
+    class_name: str | None = None
+
+
+class AssetEditRequest(BaseModel):
+    selection: str
+    change_request: str
+
+
+class PluginSelectionRequest(BaseModel):
+    selection_name: str | None = None
+    selection_type: str | None = None
+    asset_path: str | None = None
+    class_name: str | None = None
+    source: str | None = None
+
+
+class DeepAssetAnalysisRequest(BaseModel):
+    asset_kind: str = ""
+    exported_text: str | None = None
+    selection_name: str | None = None
+    class_name: str | None = None
+    asset_path: str | None = None
+    source: str | None = None
+
+
 @app.get("/")
 def home():
     return FileResponse("static/index.html")
@@ -52,6 +158,8 @@ def status():
     return {
         "project_path": PROJECT_CACHE["project_path"],
         "file_count": len(PROJECT_CACHE["files"]),
+        "asset_count": len(PROJECT_CACHE["assets"]),
+        "indexed_terms": len((PROJECT_CACHE["search_index"] or {}).get("postings", {})),
         "api_key_configured": bool(os.getenv("OPENAI_API_KEY"))
     }
 
@@ -62,28 +170,37 @@ def scan_project_endpoint(request: ScanRequest):
     if not project_path:
         return {"error": "Project path is required."}
 
-    result = scan_project(project_path)
+    try:
+        result = scan_project(project_path)
 
-    if "error" in result:
-        return result
+        if "error" in result:
+            return result
 
-    PROJECT_CACHE["project_path"] = result["project_path"]
-    PROJECT_CACHE["files"] = result["files"]
+        PROJECT_CACHE["project_path"] = result["project_path"]
+        PROJECT_CACHE["files"] = result["files"]
+        PROJECT_CACHE["assets"] = result["asset_files"]
+        PROJECT_CACHE["analysis"] = build_project_analysis(result["files"], result["asset_files"])
+        PROJECT_CACHE["search_index"] = build_search_index(PROJECT_CACHE["analysis"]["files"])
+        PROJECT_CACHE["conversation_history"] = []
+        PROJECT_CACHE["current_focus"] = None
 
-    return {
-        "message": "Project scanned successfully.",
-        "project_path": result["project_path"],
-        "file_count": result["file_count"],
-        "loaded_count": result["loaded_count"],
-        "total_files_seen": result["total_files_seen"],
-        "skipped_generated_count": result["skipped_generated_count"],
-        "skipped_binary_count": result["skipped_binary_count"],
-        "skipped_unknown_count": result["skipped_unknown_count"],
-        "skipped_large_count": result["skipped_large_count"],
-        "unreadable_count": result["unreadable_count"],
-        "loaded_files": result["loaded_files"],
-        "top_extensions": result["top_extensions"],
-    }
+        return {
+            "message": "Project scanned successfully.",
+            "project_path": result["project_path"],
+            "file_count": result["file_count"],
+            "asset_count": len(result["asset_files"]),
+            "loaded_count": result["loaded_count"],
+            "total_files_seen": result["total_files_seen"],
+            "skipped_generated_count": result["skipped_generated_count"],
+            "skipped_binary_count": result["skipped_binary_count"],
+            "skipped_unknown_count": result["skipped_unknown_count"],
+            "skipped_large_count": result["skipped_large_count"],
+            "unreadable_count": result["unreadable_count"],
+            "loaded_files": result["loaded_files"],
+            "top_extensions": result["top_extensions"],
+        }
+    except Exception as exc:
+        return {"error": f"Scan failed: {exc}"}
 
 
 @app.post("/analyze-error")
@@ -142,7 +259,7 @@ def ask_question(request: AskRequest):
             "matches": []
         }
 
-    matches = search_files(files, question, max_results=5)
+    matches = search_files(files, question, max_results=5, index_data=PROJECT_CACHE["search_index"])
 
     context_text = "\n\n".join(
         f"FILE: {match['path']}\nSNIPPET:\n{match['snippet']}"
@@ -155,6 +272,9 @@ def ask_question(request: AskRequest):
     user_prompt = f"""
 User question:
 {question}
+
+Recent context:
+{format_recent_history()}
 
 Relevant project context:
 {context_text}
@@ -169,9 +289,1463 @@ Relevant project context:
     )
 
     answer = response.choices[0].message.content
+    remember_interaction(question, answer)
 
     return {
         "answer": answer,
         "matches": matches,
         "project_path": PROJECT_CACHE["project_path"]
     }
+
+
+@app.post("/task-workflow")
+def task_workflow(request: TaskRequest):
+    goal = request.goal.strip()
+    if not goal:
+        return {"error": "Describe the task first."}
+
+    analyzed_files = get_analyzed_files()
+    if not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+
+    matches = search_files(analyzed_files, goal, max_results=8, index_data=PROJECT_CACHE["search_index"])
+    scoped_files = []
+    for match in matches:
+        file_record = find_file_record(match["path"])
+        if file_record:
+            scoped_files.append(file_record)
+
+    workflow = build_task_workflow(goal, scoped_files)
+    if os.getenv("OPENAI_API_KEY") and scoped_files:
+        workflow["ai_plan"] = summarize_task_with_llm(goal, scoped_files, workflow)
+
+    remember_interaction(goal, workflow.get("ai_plan") or workflow["summary"])
+    return workflow
+
+
+@app.post("/references")
+def references(request: ReferenceRequest):
+    symbol = request.symbol.strip()
+    if not symbol:
+        return {"error": "Enter a class, function, variable, macro, or asset name."}
+
+    analyzed_files = get_analyzed_files()
+    if not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+
+    result = find_references(analyzed_files, symbol)
+    asset_matches = [
+        asset for asset in PROJECT_CACHE["assets"]
+        if symbol.lower() in asset["name"].lower() or symbol.lower() in asset["path"].lower()
+    ]
+    return {"symbol": symbol, "asset_matches": asset_matches[:12], **result}
+
+
+@app.post("/explain-file")
+def explain_file(request: FileRequest):
+    file_record = find_file_record(request.path)
+    if not file_record:
+        return {"error": "That file was not found in the scanned project cache."}
+
+    explanation = build_file_explanation(file_record, mode=request.mode.strip().lower() or "beginner")
+
+    if os.getenv("OPENAI_API_KEY"):
+        llm_summary = summarize_file_with_llm(file_record, explanation, request.mode)
+        explanation["llm_summary"] = llm_summary
+
+    PROJECT_CACHE["current_focus"] = file_record["path"]
+    return explanation
+
+
+@app.post("/review-file")
+def review_file(request: FileRequest):
+    file_record = find_file_record(request.path)
+    if not file_record:
+        return {"error": "That file was not found in the scanned project cache."}
+
+    return {
+        "path": file_record["path"],
+        "suggestions": generate_code_suggestions(file_record),
+        "explanation": build_file_explanation(file_record, mode="refactor"),
+    }
+
+
+@app.post("/blueprint-links")
+def blueprint_links(request: BlueprintLinkRequest):
+    class_name = request.class_name.strip().lower()
+    analysis = PROJECT_CACHE["analysis"]
+    if not class_name:
+        return {"error": "Enter a C++ class name first."}
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+
+    matches = []
+    for item in analysis["blueprint_links"]:
+        if class_name in item["class_name"].lower():
+            matches.append(item)
+
+    asset_fallback = []
+    for asset in analysis["assets"]:
+        asset_name = asset["name"].lower()
+        if class_name in asset_name or asset_name.endswith(class_name.lstrip("au")):
+            asset_fallback.append(asset)
+
+    return {
+        "class_name": request.class_name,
+        "matches": matches,
+        "asset_fallback": asset_fallback[:8],
+    }
+
+
+@app.get("/architecture-map")
+def architecture_map():
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+    return analysis["architecture"]
+
+
+@app.get("/dependency-map")
+def dependency_map():
+    analyzed_files = get_analyzed_files()
+    if not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+    return build_dependency_map(analyzed_files)
+
+
+@app.post("/folder-explainer")
+def folder_explainer(request: FolderRequest):
+    analyzed_files = get_analyzed_files()
+    if not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+    folder_path = request.folder_path.strip()
+    if not folder_path:
+        return {"error": "Enter a folder path first."}
+    return build_folder_summary(analyzed_files, folder_path)
+
+
+@app.get("/blueprint-awareness")
+def blueprint_awareness():
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+
+    asset_families = {}
+    for asset in analysis["assets"]:
+        asset_families.setdefault(asset["family"], []).append(asset)
+
+    return {
+        "families": {
+            family: assets[:10]
+            for family, assets in asset_families.items()
+        }
+    }
+
+
+@app.get("/specialized-assets")
+def specialized_assets():
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+    return summarize_specialized_assets(analysis["files"], analysis["assets"])
+
+
+@app.post("/specialized-assets/family")
+def specialized_asset_family(request: AssetFamilyRequest):
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+
+    summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
+    family = request.family.strip().lower()
+    aliases = {
+        "blueprints": "blueprints",
+        "animbps": "animbps",
+        "behavior trees": "behavior_trees",
+        "behavior_trees": "behavior_trees",
+        "dataassets": "data_assets",
+        "data_assets": "data_assets",
+        "enhanced input": "enhanced_input",
+        "enhanced_input": "enhanced_input",
+        "materials": "materials",
+        "statetrees": "state_trees",
+        "state_trees": "state_trees",
+        "control rig": "control_rig",
+        "control_rig": "control_rig",
+        "niagara": "niagara",
+        "eqs": "eqs",
+        "sequencer": "sequencer",
+    }
+    resolved = aliases.get(family, family)
+    if resolved not in summaries:
+        return {"error": "Unknown family. Try enhanced_input, behavior_trees, data_assets, materials, animbps, state_trees, control_rig, niagara, eqs, or sequencer."}
+    summary = summaries[resolved]
+    if os.getenv("OPENAI_API_KEY") and (summary["assets"] or summary["code_signals"]):
+        summary["ai_summary"] = summarize_specialized_family_with_llm(summary)
+    return summary
+
+
+@app.post("/selection-analysis")
+def selection_analysis(request: SelectionRequest):
+    selection = request.selection.strip()
+    if not selection:
+        return {"error": "Enter a currently selected file, class, or asset name."}
+
+    file_record = find_file_record(selection)
+    if file_record:
+        return {
+            "selection": selection,
+            "selection_type": "file",
+            "explanation": build_file_explanation(file_record, mode="technical"),
+            "suggestions": generate_code_suggestions(file_record),
+        }
+
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+
+    asset_matches = find_matching_assets(analysis["assets"], selection, limit=8)
+    if asset_matches and asset_matches[0].get("match_score", 0) >= 8:
+        summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
+        asset_detail = build_asset_details(
+            selection=selection,
+            asset=asset_matches[0],
+            files=analysis["files"],
+            assets=analysis["assets"],
+            blueprint_links=analysis["blueprint_links"],
+            family_summaries=summaries,
+        )
+        asset_detail["asset_matches"] = asset_matches[:8]
+        return asset_detail
+
+    reference_result = find_references(get_analyzed_files(), selection, max_results=8)
+    blueprint_result = []
+    for item in analysis["blueprint_links"]:
+        if selection.lower() in item["class_name"].lower():
+            blueprint_result.append(item)
+
+    return {
+        "selection": selection,
+        "selection_type": "symbol_or_asset",
+        "references": reference_result,
+        "blueprint_links": blueprint_result,
+        "assets": asset_matches[:8],
+    }
+
+
+@app.post("/asset-details")
+def asset_details(request: AssetDetailRequest):
+    selection = request.selection.strip()
+    if not selection:
+        return {"error": "Enter an asset name or scanned asset path."}
+
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+
+    asset_matches = find_matching_assets(analysis["assets"], selection, limit=8)
+    if not asset_matches:
+        return {"error": "No matching scanned asset was found."}
+
+    summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
+    result = build_asset_details(
+        selection=selection,
+        asset=asset_matches[0],
+        files=analysis["files"],
+        assets=analysis["assets"],
+        blueprint_links=analysis["blueprint_links"],
+        family_summaries=summaries,
+    )
+    result["asset_matches"] = asset_matches[:8]
+    return result
+
+
+@app.post("/asset-scaffold")
+def asset_scaffold(request: AssetScaffoldRequest):
+    asset_kind = request.asset_kind.strip().lower()
+    name = request.name.strip()
+    purpose = (request.purpose or "").strip()
+    class_name = (request.class_name or "").strip()
+
+    if not asset_kind:
+        return {"error": "Choose an asset kind first."}
+    if not name:
+        return {"error": "Provide an asset name first."}
+
+    aliases = {
+        "blueprint": "blueprint_class",
+        "blueprint_class": "blueprint_class",
+        "bp": "blueprint_class",
+        "dataasset": "data_asset",
+        "data_asset": "data_asset",
+        "input_action": "input_action",
+        "inputaction": "input_action",
+        "input_mapping_context": "input_mapping_context",
+        "inputmappingcontext": "input_mapping_context",
+        "mapping_context": "input_mapping_context",
+        "imc": "input_mapping_context",
+    }
+    resolved = aliases.get(asset_kind, asset_kind)
+
+    if resolved == "blueprint_class":
+        return build_blueprint_class_scaffold(name=name, purpose=purpose, class_name=class_name)
+    if resolved == "data_asset":
+        return build_data_asset_scaffold(name=name, purpose=purpose, class_name=class_name)
+    if resolved == "input_action":
+        return build_input_action_scaffold(name=name, purpose=purpose)
+    if resolved == "input_mapping_context":
+        return build_input_mapping_context_scaffold(name=name, purpose=purpose)
+
+    return {"error": "Scaffolding currently supports blueprint_class, data_asset, input_action, and input_mapping_context."}
+
+
+@app.post("/asset-edit-plan")
+def asset_edit_plan(request: AssetEditRequest):
+    selection = request.selection.strip()
+    change_request = request.change_request.strip()
+
+    if not selection:
+        return {"error": "Select an asset first."}
+    if not change_request:
+        return {"error": "Describe the change you want first."}
+
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+
+    asset_matches = find_matching_assets(analysis["assets"], selection, limit=4)
+    if not asset_matches:
+        return {"error": "No matching scanned asset was found."}
+
+    asset = asset_matches[0]
+    family = asset.get("family", "")
+    asset_type = asset.get("asset_type", "")
+
+    details = build_asset_details(
+        selection=selection,
+        asset=asset,
+        files=analysis["files"],
+        assets=analysis["assets"],
+        blueprint_links=analysis["blueprint_links"],
+        family_summaries=summarize_specialized_assets(analysis["files"], analysis["assets"]),
+    )
+    if looks_like_rename_request(change_request):
+        return build_asset_rename_edit_plan(asset, change_request, details)
+    if family == "data_asset" or asset_type == "data_asset":
+        return build_data_asset_edit_plan(asset, change_request, details)
+    if family == "enhanced_input" or asset_type in {"input_action", "input_mapping_context"}:
+        return build_enhanced_input_edit_plan(asset, change_request, details)
+    if family in {"behavior_tree", "blackboard"} or asset_type in {"behavior_tree", "blackboard"}:
+        return build_behavior_tree_edit_plan(asset, change_request, details)
+    if family in {"material", "material_instance"} or "material" in asset_type:
+        return build_material_edit_plan(asset, change_request, details)
+    if family in {"blueprint", "ui"} or "blueprint" in asset_type:
+        if looks_like_function_request(change_request):
+            return build_blueprint_function_edit_plan(asset, change_request, details)
+        return build_blueprint_variable_edit_plan(asset, change_request, details)
+    return {"error": "Controlled edit plans currently support rename planning plus DataAssets, Enhanced Input assets, Behavior Trees, Materials, and Blueprint variable/function planning first."}
+
+
+@app.post("/plugin/selection-context")
+def plugin_selection_context(request: PluginSelectionRequest):
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+
+    selection_name = (request.selection_name or "").strip()
+    selection_type = (request.selection_type or "unknown").strip()
+    asset_path = (request.asset_path or "").strip()
+    class_name = (request.class_name or "").strip()
+
+    lookup_terms = [term for term in [selection_name, class_name, asset_path] if term]
+    if not lookup_terms:
+        return {"error": "The plugin did not send enough selection information."}
+
+    primary_term = selection_name or class_name or asset_path
+    base_result = selection_analysis(SelectionRequest(selection=primary_term))
+
+    specialized_summary = None
+    summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
+    haystack = " ".join(lookup_terms).lower()
+    for summary in summaries.values():
+        title = summary.get("title", "").lower()
+        family_key = summary.get("family_key", "").lower()
+        if family_key in haystack or any(asset["name"].lower() in haystack for asset in summary.get("assets", [])):
+            specialized_summary = summary
+            break
+        if title and any(part in haystack for part in title.split()):
+            specialized_summary = summary
+            break
+
+    matched_files = search_files(
+        analysis["files"],
+        " ".join(lookup_terms),
+        max_results=6,
+        index_data=PROJECT_CACHE["search_index"]
+    )
+
+    return {
+        "selection_name": selection_name,
+        "selection_type": selection_type,
+        "asset_path": asset_path,
+        "class_name": class_name,
+        "source": request.source or "plugin",
+        "selection_analysis": base_result,
+        "matched_files": matched_files,
+        "specialized_family": specialized_summary,
+    }
+
+
+@app.post("/asset-deep-analysis")
+def asset_deep_analysis(request: DeepAssetAnalysisRequest):
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return {"error": "No project has been scanned yet."}
+
+    asset_kind = request.asset_kind.strip().lower()
+    exported_text = (request.exported_text or "").strip()
+    selection_name = (request.selection_name or "").strip()
+    class_name = (request.class_name or "").strip()
+    asset_path = (request.asset_path or "").strip()
+    matched_asset = None
+
+    lookup_term = selection_name or asset_path
+    if lookup_term:
+        matches = find_matching_assets(analysis["assets"], lookup_term, limit=1)
+        matched_asset = matches[0] if matches else None
+
+    asset_kind = infer_deep_asset_kind(
+        asset=matched_asset,
+        selection_name=selection_name,
+        asset_path=asset_path,
+        asset_kind=asset_kind,
+    )
+
+    if not asset_kind:
+        return {"error": "Asset kind could not be inferred. Pick a deep asset kind or provide a clearer selected asset name/path."}
+
+    summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
+    family_aliases = {
+        "blueprint": "blueprints",
+        "animbp": "animbps",
+        "animation_blueprint": "animbps",
+        "behavior_tree": "behavior_trees",
+        "material": "materials",
+        "enhanced_input": "enhanced_input",
+        "input": "enhanced_input",
+    }
+    family_summary = summaries.get(family_aliases.get(asset_kind, asset_kind))
+
+    result = analyze_deep_asset(
+        asset_kind=asset_kind,
+        exported_text=exported_text,
+        selection_name=selection_name or (matched_asset or {}).get("name", ""),
+        class_name=class_name,
+        family_summary=family_summary,
+    )
+    result["asset_path"] = asset_path or (matched_asset or {}).get("path", "")
+    result["resolved_asset_kind"] = asset_kind
+    if matched_asset:
+        result["resolved_asset_name"] = matched_asset.get("name", "")
+    result["source"] = request.source or "web"
+
+    if os.getenv("OPENAI_API_KEY") and exported_text:
+        result["ai_summary"] = summarize_deep_asset_with_llm(result, exported_text)
+
+    return result
+
+
+@app.post("/explain-blueprint-nodes")
+def explain_nodes(request: BlueprintNodeRequest):
+    nodes_text = request.nodes_text.strip()
+    if not nodes_text:
+        return {"error": "Paste copied Blueprint node text first."}
+    return explain_blueprint_nodes(nodes_text)
+
+
+@app.post("/reflection-analyzer")
+def reflection_analyzer(request: ReflectionRequest):
+    text = (request.text or "").strip()
+    if not text and request.path:
+        file_record = find_file_record(request.path)
+        if not file_record:
+            return {"error": "That file was not found in the scanned project cache."}
+        text = file_record.get("content", "")
+    if not text:
+        return {"error": "Provide a file path or paste Unreal reflection code first."}
+    return analyze_reflection_text(text)
+
+
+@app.post("/analyze-crash-log")
+def analyze_crash_log(request: TextRequest):
+    text = request.text.strip()
+    if not text:
+        return {"error": "Paste a crash log or stack trace first."}
+
+    if not os.getenv("OPENAI_API_KEY"):
+        return {"analysis": heuristic_log_summary(text, log_type="crash")}
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": CRASH_LOG_SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ]
+    )
+    return {"analysis": response.choices[0].message.content}
+
+
+@app.post("/analyze-output-log")
+def analyze_output_log(request: TextRequest):
+    text = request.text.strip()
+    if not text:
+        return {"error": "Paste a UE output log first."}
+
+    if not os.getenv("OPENAI_API_KEY"):
+        return {"analysis": heuristic_log_summary(text, log_type="output")}
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": OUTPUT_LOG_SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ]
+    )
+    return {"analysis": response.choices[0].message.content}
+
+
+def get_analyzed_files():
+    analysis = PROJECT_CACHE["analysis"]
+    if not analysis:
+        return []
+    return analysis["files"]
+
+
+def find_file_record(path_or_name: str):
+    needle = path_or_name.strip().lower()
+    for file_record in get_analyzed_files():
+        if file_record["path"].lower() == needle or file_record["name"].lower() == needle:
+            return file_record
+    for file_record in get_analyzed_files():
+        if needle in file_record["path"].lower():
+            return file_record
+    return None
+
+
+def summarize_file_with_llm(file_record, explanation, mode):
+    content = file_record.get("content", "")
+    chunks = chunk_text(content, chunk_size=7000, overlap=400)
+    chunk_notes = []
+
+    for index, chunk in enumerate(chunks, start=1):
+        prompt = f"""
+Mode: {mode}
+Path: {file_record['path']}
+Chunk {index} of {len(chunks)}
+Heuristic explanation:
+{explanation}
+
+Code chunk:
+{chunk}
+"""
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": FILE_EXPLAIN_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        chunk_notes.append(f"Chunk {index} notes:\n{response.choices[0].message.content}")
+
+    consolidation_prompt = f"""
+Mode: {mode}
+Path: {file_record['path']}
+Heuristic explanation:
+{explanation}
+
+Chunk notes:
+{chr(10).join(chunk_notes)}
+"""
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": FILE_EXPLAIN_SUMMARY_PROMPT},
+            {"role": "user", "content": consolidation_prompt},
+        ]
+    )
+    return response.choices[0].message.content
+
+
+def summarize_task_with_llm(goal, scoped_files, workflow):
+    context_blocks = []
+    for file_record in scoped_files[:6]:
+        snippet = file_record.get("content", "")[:3000]
+        context_blocks.append(
+            f"FILE: {file_record['path']}\nSYMBOLS: {', '.join(file_record['analysis']['all_symbol_names'][:8])}\nCODE:\n{snippet}"
+        )
+
+    prompt = f"""
+Task goal:
+{goal}
+
+Recent context:
+{format_recent_history()}
+
+Heuristic workflow:
+{workflow}
+
+Relevant files:
+{chr(10).join(context_blocks)}
+"""
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": TASK_WORKFLOW_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+    )
+    return response.choices[0].message.content
+
+
+def summarize_specialized_family_with_llm(summary):
+    prompt = f"""
+Family:
+{summary['title']}
+
+Structured summary:
+{summary}
+"""
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": SPECIALIZED_FAMILY_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+    )
+    return response.choices[0].message.content
+
+
+def summarize_deep_asset_with_llm(result, exported_text):
+    prompt = f"""
+Deep asset analysis request:
+{result}
+
+Exported text:
+{exported_text[:16000]}
+"""
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": DEEP_ASSET_ANALYSIS_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+    )
+    return response.choices[0].message.content
+
+
+def build_data_asset_scaffold(name, purpose="", class_name=""):
+    clean_name = sanitize_asset_name(name, "DA_")
+    base_class = class_name or f"U{clean_name[3:]}DataAsset"
+    header_path = f"Source/YourGame/Public/Data/{base_class}.h"
+
+    header = f"""#pragma once
+
+#include "CoreMinimal.h"
+#include "Engine/DataAsset.h"
+#include "{base_class}.generated.h"
+
+UCLASS(BlueprintType)
+class YOURGAME_API {base_class} : public UPrimaryDataAsset
+{{
+    GENERATED_BODY()
+
+public:
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Config")
+    FName Id = NAME_None;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Config")
+    FText DisplayName;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Config")
+    FString Description;
+}};
+"""
+
+    steps = [
+        f"Create the C++ class `{base_class}` and compile the project.",
+        f"In Unreal, create a new Data Asset from `{base_class}` named `{clean_name}`.",
+        "Fill in the exposed properties and assign the asset in the owning system or manager.",
+        "Use soft references if the asset should stay decoupled from always-loaded gameplay code.",
+    ]
+    if purpose:
+        steps.insert(2, f"Model the fields around this purpose: {purpose}")
+
+    return {
+        "asset_kind": "data_asset",
+        "title": f"{clean_name} DataAsset Scaffold",
+        "summary": "This scaffold gives you a safe starting point for a designer-editable gameplay data asset.",
+        "recommended_asset_name": clean_name,
+        "recommended_class_name": base_class,
+        "recommended_asset_path": f"Content/Data/{clean_name}",
+        "steps": steps,
+        "files": [
+            {
+                "label": header_path,
+                "language": "cpp",
+                "content": header,
+            }
+        ],
+    }
+
+
+def build_blueprint_class_scaffold(name, purpose="", class_name=""):
+    clean_name = sanitize_asset_name(name, "BP_")
+    parent_class = class_name or infer_blueprint_parent_class(clean_name, purpose)
+    variable_notes = infer_blueprint_variable_suggestions(clean_name, purpose)
+    function_notes = infer_blueprint_function_suggestions(clean_name, purpose)
+
+    outline = f"""Asset: {clean_name}
+Type: Blueprint Class
+Parent Class: {parent_class}
+Purpose: {purpose or "Gameplay Blueprint class"}
+
+Recommended starter variables:
+{chr(10).join(f"- {item}" for item in variable_notes)}
+
+Recommended starter events/functions:
+{chr(10).join(f"- {item}" for item in function_notes)}
+"""
+
+    steps = [
+        f"In Unreal, create a new Blueprint Class named `{clean_name}`.",
+        f"Use `{parent_class}` as the parent class unless your project already has a better custom base type.",
+        "Add only the variables and functions that establish the ownership boundary for this Blueprint.",
+        "Keep reusable or performance-sensitive logic in C++ and reserve Blueprint for orchestration, tuning, and project-specific behavior.",
+        "After creation, validate the spawn path, exposed defaults, and parent-class assumptions together.",
+    ]
+
+    return {
+        "asset_kind": "blueprint_class",
+        "title": f"{clean_name} Blueprint Class Scaffold",
+        "summary": "This scaffold gives you a safe starter plan for a simple Blueprint gameplay class without attempting graph generation.",
+        "recommended_asset_name": clean_name,
+        "recommended_asset_path": f"Content/Blueprints/{clean_name}",
+        "recommended_parent_class": parent_class,
+        "steps": steps,
+        "files": [
+            {
+                "label": "Blueprint Class Outline",
+                "language": "text",
+                "content": outline,
+            }
+        ],
+    }
+
+
+def build_input_action_scaffold(name, purpose=""):
+    clean_name = sanitize_asset_name(name, "IA_")
+    description = purpose or "Player input action"
+
+    outline = f"""Asset: {clean_name}
+Type: Input Action
+Value Type: Boolean (change if this should be Axis1D/Axis2D/Axis3D)
+Description: {description}
+
+Recommended setup:
+- Triggers: Pressed
+- Modifiers: None by default
+- Consume Input: Enabled
+"""
+
+    steps = [
+        f"Create an Input Action asset named `{clean_name}` under `Content/Input/Actions`.",
+        "Choose the smallest value type that matches the gameplay need.",
+        "Add triggers/modifiers only when the raw input should be transformed at the asset level.",
+        "Bind the action in the owning pawn, character, or controller and verify the mapping context is active.",
+    ]
+
+    return {
+        "asset_kind": "input_action",
+        "title": f"{clean_name} Input Action Scaffold",
+        "summary": "This scaffold gives you a safe starter layout for a single Enhanced Input action.",
+        "recommended_asset_name": clean_name,
+        "recommended_asset_path": f"Content/Input/Actions/{clean_name}",
+        "steps": steps,
+        "files": [
+            {
+                "label": "Input Action Outline",
+                "language": "text",
+                "content": outline,
+            }
+        ],
+    }
+
+
+def build_input_mapping_context_scaffold(name, purpose=""):
+    clean_name = sanitize_asset_name(name, "IMC_")
+    description = purpose or "Gameplay mapping context"
+
+    outline = f"""Asset: {clean_name}
+Type: Input Mapping Context
+Description: {description}
+
+Recommended starter mappings:
+- IA_Move -> W/A/S/D or Left Stick
+- IA_Look -> Mouse Delta or Right Stick
+- IA_Jump -> Space Bar / Gamepad Face Bottom
+- IA_Interact -> E / Gamepad Face Right
+"""
+
+    steps = [
+        f"Create an Input Mapping Context asset named `{clean_name}` under `Content/Input/Contexts`.",
+        "Add only the actions needed for this gameplay layer so ownership stays clear.",
+        "Apply the mapping context from the local-player subsystem at the right lifecycle moment.",
+        "Set priority intentionally if this context overlaps with menus, vehicles, or temporary interaction modes.",
+    ]
+
+    return {
+        "asset_kind": "input_mapping_context",
+        "title": f"{clean_name} Input Mapping Context Scaffold",
+        "summary": "This scaffold gives you a safe starter mapping context for Enhanced Input.",
+        "recommended_asset_name": clean_name,
+        "recommended_asset_path": f"Content/Input/Contexts/{clean_name}",
+        "steps": steps,
+        "files": [
+            {
+                "label": "Input Mapping Context Outline",
+                "language": "text",
+                "content": outline,
+            }
+        ],
+    }
+
+
+def sanitize_asset_name(name, prefix):
+    raw = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name.strip())
+    raw = "_".join(part for part in raw.split("_") if part)
+    if not raw:
+        raw = prefix.rstrip("_") + "_NewAsset"
+    if not raw.lower().startswith(prefix.lower()):
+        raw = f"{prefix}{raw}"
+    return raw
+
+
+def build_data_asset_edit_plan(asset, change_request, details):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    fields_to_check = [
+        "IDs, names, and enum-like fields that gate lookup logic",
+        "Soft object/class references that may affect loading or spawn behavior",
+        "Numeric tuning values that may need companion balance changes",
+        "Any booleans that unlock optional behaviors or content branches",
+    ]
+    risks = [
+        "Changing a DataAsset can affect every system that reads it, not just one actor or level instance.",
+        "Soft-reference or null/default handling can break at runtime if a value is cleared or renamed carelessly.",
+        "Balance changes may need companion updates in UI text, AI tuning, or animation timing if those systems also consume this data.",
+    ]
+    validation = [
+        f"Open `{asset_name}` in the editor and make the smallest possible value change first.",
+        "Search for the owning runtime class and any managers/components that load this asset.",
+        "Play the exact gameplay path that consumes the changed data and verify both normal and fallback behavior.",
+        "Check logs for missing references, null data, or unexpected defaults after the change.",
+    ]
+    if owner != "None":
+        validation.insert(1, f"Inspect `{owner}` first, because it looks like the strongest code owner for this DataAsset.")
+
+    return {
+        "asset_kind": "data_asset_edit",
+        "title": f"Edit Plan for {asset_name}",
+        "summary": f"This is a controlled edit plan for changing DataAsset values in `{asset_name}` without blindly editing the binary asset.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "what_to_change": [
+            f"Requested change: {change_request}",
+            "Prefer changing only the smallest set of fields needed to achieve the behavior.",
+            "Keep old values nearby so you can compare and revert quickly if the runtime result drifts.",
+        ],
+        "fields_to_check": fields_to_check,
+        "risks": risks,
+        "validation_steps": validation,
+    }
+
+
+def build_asset_rename_edit_plan(asset, change_request, details):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    family = asset.get("family", "")
+    current_name = asset_name.rsplit(".", 1)[0]
+    suggested_name = infer_rename_target(change_request, current_name)
+
+    what_to_change = [
+        f"Requested change: {change_request}",
+        f"Rename `{current_name}` to a clearer target like `{suggested_name}` only if the new name improves ownership and matches project naming conventions.",
+        "Update the asset display name, any exposed labels/categories, and all human-facing references together so naming stays consistent.",
+        "Search for both hard references and naming-based lookups before you commit to the rename.",
+    ]
+
+    fields_to_check = [
+        "Asset name and path",
+        "Any exposed parameter, variable, or label that mirrors the old name",
+        "Code or Blueprint references that use the old asset name directly",
+        "Soft-reference paths, lookup IDs, tags, or data keys that may embed the old name",
+        "UI/debug text or editor-facing labels that designers rely on",
+    ]
+
+    risks = [
+        "Renames can silently break soft references, string-based lookups, or naming-convention-driven inference.",
+        "Blueprint and content references may update differently from code or config references, so the rename can look fine in-editor but fail at runtime.",
+        "If the old name carries semantic meaning used by designers or tooling, a rename can create confusion even when technical references are fixed.",
+    ]
+    if family == "data_asset":
+        risks.append("DataAsset renames can break data tables, settings, or lookup maps that expect stable IDs or names.")
+    if family in {"blueprint", "ui"}:
+        risks.append("Blueprint renames can affect spawn assumptions, asset-search workflows, or parent/child content conventions.")
+    if family == "enhanced_input":
+        risks.append("Input asset renames can desync naming between IA_/IMC_ assets and the code paths that bind them.")
+
+    validation = [
+        f"Search the project for `{current_name}` before renaming so you know every place the old name matters.",
+        "Rename the asset in the editor first so Unreal can update asset references where possible.",
+        "Re-run reference searches for both the old and new names after the rename to catch missed strings or config paths.",
+        "Test the runtime flow that loads, spawns, or binds this asset and confirm no fallback/default path starts firing unexpectedly.",
+        "If the asset is designer-facing, confirm the new name still matches existing folder and prefix conventions.",
+    ]
+    if owner != "None":
+        validation.insert(1, f"Inspect `{owner}` first, because it looks like the strongest runtime owner for this asset.")
+
+    return {
+        "asset_kind": "asset_rename_edit",
+        "title": f"Rename Plan for {asset_name}",
+        "summary": f"This is a controlled rename plan for `{asset_name}` focused on references, exposed names, and runtime safety.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "suggested_new_name": suggested_name,
+        "what_to_change": what_to_change,
+        "fields_to_check": fields_to_check,
+        "risks": risks[:5],
+        "validation_steps": validation,
+    }
+
+
+def build_enhanced_input_edit_plan(asset, change_request, details):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    is_mapping_context = asset.get("asset_type") == "input_mapping_context"
+    subject = "mapping context" if is_mapping_context else "input action"
+
+    what_to_change = [
+        f"Requested change: {change_request}",
+        f"Add the smallest new {subject}-level definition needed before changing runtime binding code.",
+        "Keep naming consistent with existing IA_/IMC_ conventions so the ownership stays obvious.",
+    ]
+
+    fields_to_check = [
+        "Action name, value type, and any trigger/modifier assumptions",
+        "Which mapping context should own the new action",
+        "Which pawn/controller/local-player subsystem layer should bind or add it",
+        "Whether the input should be contextual, modal, or always active",
+    ]
+
+    risks = [
+        "New input can conflict with existing bindings or context priorities if it is added in the wrong layer.",
+        "An action can exist in content but still do nothing if the mapping context is never applied or the binding code is missing.",
+        "Enhanced Input bugs often look intermittent when multiple contexts override or duplicate the same input.",
+    ]
+
+    validation = [
+        f"Open `{asset_name}` in the editor and add the new {subject} definition in the smallest possible place first.",
+        "Confirm the intended mapping context is active for the local player during the gameplay flow you care about.",
+        "Verify the owning pawn/controller actually binds the new action and that the callback fires once per expected trigger.",
+        "Test input priority conflicts against menus, vehicles, interaction modes, or any temporary contexts.",
+    ]
+    if owner != "None":
+        validation.insert(1, f"Inspect `{owner}` first, because it looks like the strongest runtime owner for this input setup.")
+
+    return {
+        "asset_kind": "enhanced_input_edit",
+        "title": f"Edit Plan for {asset_name}",
+        "summary": f"This is a controlled edit plan for changing Enhanced Input setup in `{asset_name}` without guessing at bindings or context ownership.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "what_to_change": what_to_change,
+        "fields_to_check": fields_to_check,
+        "risks": risks,
+        "validation_steps": validation,
+    }
+
+
+def build_behavior_tree_edit_plan(asset, change_request, details):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    node_kind = infer_behavior_tree_node_kind(change_request)
+    suggested_name = infer_behavior_tree_node_name(change_request, node_kind)
+
+    what_to_change = [
+        f"Requested change: {change_request}",
+        f"Add or adjust the smallest possible `{node_kind}` node first, using a name like `{suggested_name}` if you need a new asset/class.",
+        "Decide whether the change belongs in the tree structure, a Blackboard key, or task/service/decorator logic before editing multiple places.",
+        "Keep the behavior localized so the tree remains readable and debuggable.",
+    ]
+
+    fields_to_check = [
+        "Which Blackboard keys the change reads or writes",
+        "Where in the tree flow the new or changed node should live",
+        "Whether the logic belongs in a Task, Service, or Decorator",
+        "Which AIController, pawn, or subsystem starts this tree",
+        "Whether the change should be conditional, periodic, or one-shot",
+    ]
+
+    risks = [
+        "Behavior Tree edits can look correct structurally but still fail if Blackboard keys are missing or written too late.",
+        "Adding logic to Services or Decorators can spread behavior across the tree and make debugging much harder.",
+        "A small tree change can alter AI priority/order in ways that only show up under gameplay pressure.",
+    ]
+    if "service" in change_request.lower():
+        risks.append("Service-heavy logic can become noisy and expensive if it runs more often than necessary.")
+    if "decorator" in change_request.lower():
+        risks.append("Decorator conditions can silently gate whole branches, so false assumptions about key values are costly.")
+
+    validation = [
+        f"Open `{asset_name}` and make the smallest tree change possible first.",
+        "Inspect the Blackboard asset alongside the tree so every key used by the change is present and typed correctly.",
+        "Verify the owning AIController or startup path actually runs this tree in the gameplay case you care about.",
+        "Use Gameplay Debugger or Blackboard inspection to confirm key values before and after the change.",
+        "Test multiple branch outcomes so the new logic does not only work in the happy path.",
+    ]
+    if owner != "None":
+        validation.insert(1, f"Inspect `{owner}` first, because it looks like the strongest runtime owner for this AI behavior.")
+
+    return {
+        "asset_kind": "behavior_tree_edit",
+        "title": f"Edit Plan for {asset_name}",
+        "summary": f"This is a controlled edit plan for changing Behavior Tree flow in `{asset_name}` without guessing at Blackboard state or AI ownership.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "suggested_node_kind": node_kind,
+        "suggested_node_name": suggested_name,
+        "what_to_change": what_to_change,
+        "fields_to_check": fields_to_check,
+        "risks": risks[:5],
+        "validation_steps": validation,
+    }
+
+
+def build_material_edit_plan(asset, change_request, details):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    parameter_name = infer_material_parameter_name(change_request)
+    parameter_type = infer_material_parameter_type(change_request)
+    is_instance = asset.get("asset_type") == "material_instance"
+    subject = "Material Instance parameter override" if is_instance else "Material parameter"
+
+    what_to_change = [
+        f"Requested change: {change_request}",
+        f"Adjust the smallest possible {subject.lower()} first, using a parameter like `{parameter_name}` of type `{parameter_type}`.",
+        "Prefer parameterized tweaks over hard-wiring constants if this visual may need runtime or per-instance control.",
+        "Check whether the change belongs in the base material or only in a specific material instance.",
+    ]
+
+    fields_to_check = [
+        "Parameter name and parameter type",
+        "Default value versus instance override value",
+        "Whether gameplay code updates this parameter at runtime",
+        "Whether the material is reused broadly and could affect many meshes or actors",
+        "Whether the parameter should really live in a Material Parameter Collection instead",
+    ]
+
+    risks = [
+        "Material tweaks can affect many actors at once if the material or instance is widely reused.",
+        "Parameter name mismatches can make runtime updates fail silently even when the visual asset looks correct in the editor.",
+        "Visual changes can be overridden immediately by gameplay code if a dynamic material instance sets the same parameter at runtime.",
+    ]
+    if not is_instance:
+        risks.append("Editing the base material may have much wider impact than editing a material instance.")
+    if owner != "None":
+        risks.append(f"`{owner}` may already drive this material at runtime, so static editor changes may not match play-time results.")
+
+    validation = [
+        f"Open `{asset_name}` and change the parameter in the smallest possible place first.",
+        "Search code and Blueprint flow for dynamic material instance creation and runtime parameter writes before assuming the editor value will win.",
+        "Test the material on the intended mesh/actor in the exact gameplay situation where the visual matters.",
+        "Verify the parameter name used in content exactly matches any runtime `SetScalar/SetVector/SetTextureParameterValue` usage.",
+        "Compare the change in-editor and in PIE so runtime overrides do not hide the real result.",
+    ]
+
+    return {
+        "asset_kind": "material_edit",
+        "title": f"Edit Plan for {asset_name}",
+        "summary": f"This is a controlled edit plan for tweaking Material parameters in `{asset_name}` without guessing at runtime overrides or reuse impact.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "suggested_parameter_name": parameter_name,
+        "suggested_parameter_type": parameter_type,
+        "what_to_change": what_to_change,
+        "fields_to_check": fields_to_check,
+        "risks": risks[:5],
+        "validation_steps": validation,
+    }
+
+
+def build_blueprint_variable_edit_plan(asset, change_request, details):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    lowered = change_request.lower()
+    suggested_type = infer_blueprint_variable_type(change_request)
+    expose_note = "Expose the variable to the editor only if designers actually need to tune it per asset or instance."
+
+    what_to_change = [
+        f"Requested change: {change_request}",
+        f"Add one new Blueprint variable with a clear name and a starting type like `{suggested_type}`.",
+        "Decide whether the variable is runtime state, config/default data, or a reference to another actor/component/asset before wiring any graph logic.",
+        expose_note,
+    ]
+
+    fields_to_check = [
+        "Variable name and type",
+        "Default value on the Blueprint asset or instance",
+        "Whether it should be Instance Editable, Expose on Spawn, or Blueprint Read Only/Read Write",
+        "Which graph/event/function is responsible for setting it",
+        "Which systems read it and what happens if it is unset",
+    ]
+
+    risks = [
+        "Blueprint variables easily become duplicated state if the same concept already exists in the parent C++ class or another component.",
+        "Exposing too many variables can blur ownership and make debugging defaults versus runtime values harder.",
+        "Reference variables can introduce null or lifecycle bugs if they are read before initialization.",
+    ]
+    if "replic" in lowered or "network" in lowered:
+        risks.append("Network-facing variables need an explicit replication plan; Blueprint-only variable changes can still break multiplayer assumptions.")
+    if "damage" in lowered or "speed" in lowered or "health" in lowered:
+        risks.append("Gameplay tuning variables can affect animation, UI, AI, and balance together, so verify dependent systems after the change.")
+
+    validation = [
+        f"Open `{asset_name}` in the Blueprint editor and add the variable in the smallest possible scope first.",
+        "Set a deliberate default value and test behavior with both the default and an overridden value.",
+        "Search the parent class and linked owner code to avoid duplicating an equivalent C++ property or state source.",
+        "Check every read/write site in the graph so the variable is initialized before it is consumed.",
+        "If the value is designer-facing, confirm the tooltip/category/name make the intent obvious in the Details panel.",
+    ]
+    if owner != "None":
+        validation.insert(1, f"Inspect `{owner}` first, because it looks like the strongest code owner for this Blueprint.")
+
+    return {
+        "asset_kind": "blueprint_variable_edit",
+        "title": f"Edit Plan for {asset_name}",
+        "summary": f"This is a controlled edit plan for adding or adjusting a Blueprint variable in `{asset_name}` without guessing at ownership or graph flow.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "suggested_variable_type": suggested_type,
+        "what_to_change": what_to_change,
+        "fields_to_check": fields_to_check,
+        "risks": risks[:5],
+        "validation_steps": validation,
+    }
+
+
+def build_blueprint_function_edit_plan(asset, change_request, details):
+    asset_name = asset.get("name", "")
+    asset_path = asset.get("path", "")
+    owner = details.get("linked_cpp_classes", {}).get("primary_owner", "None")
+    function_name = infer_blueprint_function_name(change_request)
+    signature = infer_blueprint_function_signature(change_request)
+
+    what_to_change = [
+        f"Requested change: {change_request}",
+        f"Add one new Blueprint function stub named `{function_name}` with a starting signature like `{signature}`.",
+        "Keep the function narrow and single-purpose so ownership stays obvious.",
+        "Decide whether this should be a pure helper function, an impure action function, or a custom event before wiring execution flow.",
+    ]
+
+    fields_to_check = [
+        "Function name and intent",
+        "Input pins and whether they should be value types or object references",
+        "Return value or output pins, if any",
+        "Where the function is called from and what initializes its inputs",
+        "Whether the same behavior already exists in the parent class, another Blueprint, or C++",
+    ]
+
+    risks = [
+        "Blueprint functions easily become duplicate logic if the same behavior already exists in the parent C++ class or another graph.",
+        "Function stubs can hide ownership issues if they mutate too much state or call into too many unrelated systems.",
+        "Reference inputs can create null/lifecycle bugs if the caller is allowed to pass invalid objects.",
+    ]
+    if "server" in change_request.lower() or "client" in change_request.lower() or "replic" in change_request.lower():
+        risks.append("Network-sensitive behavior needs a replication/RPC plan; a Blueprint function stub alone does not solve authority flow.")
+
+    validation = [
+        f"Open `{asset_name}` in the Blueprint editor and add the function stub with the smallest useful signature first.",
+        "Check the parent class and linked owner code before duplicating an existing function or gameplay hook.",
+        "Add temporary logging or a breakpoint to verify the function is called from the path you expect.",
+        "Confirm all inputs are valid before the function reads them, especially object references and data assets.",
+        "If this logic grows beyond orchestration, move reusable or performance-sensitive parts into C++.",
+    ]
+    if owner != "None":
+        validation.insert(1, f"Inspect `{owner}` first, because it looks like the strongest code owner for this Blueprint behavior.")
+
+    return {
+        "asset_kind": "blueprint_function_edit",
+        "title": f"Edit Plan for {asset_name}",
+        "summary": f"This is a controlled edit plan for adding a Blueprint function stub in `{asset_name}` without guessing at ownership or execution flow.",
+        "asset_name": asset_name,
+        "asset_path": asset_path,
+        "change_request": change_request,
+        "linked_cpp_owner": owner,
+        "suggested_function_name": function_name,
+        "suggested_function_signature": signature,
+        "what_to_change": what_to_change,
+        "fields_to_check": fields_to_check,
+        "risks": risks[:5],
+        "validation_steps": validation,
+    }
+
+
+def infer_blueprint_parent_class(name, purpose=""):
+    lowered = f"{name} {purpose}".lower()
+    if any(token in lowered for token in ("component",)):
+        return "ActorComponent"
+    if any(token in lowered for token in ("widget", "menu", "hud", "ui")):
+        return "UserWidget"
+    if any(token in lowered for token in ("controller",)):
+        return "PlayerController"
+    if any(token in lowered for token in ("pawn", "vehicle")):
+        return "Pawn"
+    if any(token in lowered for token in ("character", "enemy", "npc", "player")):
+        return "Character"
+    return "Actor"
+
+
+def infer_blueprint_variable_suggestions(name, purpose=""):
+    lowered = f"{name} {purpose}".lower()
+    variables = ["Config/Data asset reference", "State enum or gameplay state flag", "Target actor or component reference"]
+    if any(token in lowered for token in ("character", "enemy", "npc", "player", "pawn")):
+        variables.append("Movement/combat state booleans exposed for animation or UI")
+    if any(token in lowered for token in ("interact", "pickup", "usable")):
+        variables.append("Interactable prompt text and enabled state")
+    if any(token in lowered for token in ("widget", "menu", "hud", "ui")):
+        variables.append("Widget references and visibility state")
+    return variables[:5]
+
+
+def infer_blueprint_function_suggestions(name, purpose=""):
+    lowered = f"{name} {purpose}".lower()
+    functions = ["InitializeFromData", "HandleStateChanged", "RefreshPresentation"]
+    if any(token in lowered for token in ("interact", "pickup", "usable")):
+        functions.append("Interact")
+    if any(token in lowered for token in ("character", "enemy", "npc", "player")):
+        functions.append("HandleDeathOrDisable")
+    if any(token in lowered for token in ("widget", "menu", "hud", "ui")):
+        functions.append("RefreshUI")
+    return functions[:5]
+
+
+def infer_blueprint_variable_type(change_request):
+    lowered = (change_request or "").lower()
+    if any(token in lowered for token in ("count", "index", "ammo", "stack")):
+        return "Integer"
+    if any(token in lowered for token in ("speed", "damage", "health", "cooldown", "time", "distance")):
+        return "Float"
+    if any(token in lowered for token in ("enabled", "visible", "active", "dead", "alive", "can ", "has ")):
+        return "Boolean"
+    if any(token in lowered for token in ("name", "tag", "id")):
+        return "Name"
+    if any(token in lowered for token in ("text", "label", "prompt", "description")):
+        return "Text"
+    if any(token in lowered for token in ("target", "actor", "component", "weapon", "widget", "asset")):
+        return "Object Reference"
+    return "Boolean or Object Reference"
+
+
+def looks_like_function_request(change_request):
+    lowered = (change_request or "").lower()
+    function_tokens = ("function", "stub", "method", "event", "handler", "call", "execute", "run ", "trigger", "invoke")
+    variable_tokens = ("variable", "bool", "float", "int", "name", "text", "property")
+    if any(token in lowered for token in function_tokens):
+        return True
+    if any(token in lowered for token in variable_tokens):
+        return False
+    return "(" in lowered or "return" in lowered
+
+
+def looks_like_rename_request(change_request):
+    lowered = (change_request or "").lower()
+    rename_tokens = ("rename", "rename it", "rename this", "change the name", "new name", "exposed parameter", "parameter name", "display name", "label")
+    return any(token in lowered for token in rename_tokens)
+
+
+def infer_blueprint_function_name(change_request):
+    lowered = (change_request or "").lower()
+    if "interact" in lowered:
+        return "HandleInteract"
+    if "damage" in lowered:
+        return "ApplyDamageResponse"
+    if "spawn" in lowered:
+        return "HandleSpawnSetup"
+    if "fire" in lowered or "shoot" in lowered:
+        return "HandleFire"
+    if "ui" in lowered or "widget" in lowered or "menu" in lowered:
+        return "RefreshUIState"
+    if "input" in lowered:
+        return "HandleInputAction"
+    return "HandleRequestedAction"
+
+
+def infer_rename_target(change_request, fallback_name):
+    text = (change_request or "").strip()
+    quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', text)
+    extracted = []
+    for pair in quoted:
+        extracted.extend([item for item in pair if item])
+    if extracted:
+        candidate = extracted[-1]
+    else:
+        match = re.search(r"\bto\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+        candidate = match.group(1) if match else f"{fallback_name}_Renamed"
+    cleaned = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in candidate)
+    cleaned = "_".join(part for part in cleaned.split("_") if part)
+    return cleaned or f"{fallback_name}_Renamed"
+
+
+def infer_blueprint_function_signature(change_request):
+    lowered = (change_request or "").lower()
+    if "damage" in lowered:
+        return "Input: DamageAmount (Float), InstigatorActor (Actor Reference) -> Output: None"
+    if "interact" in lowered:
+        return "Input: InteractingActor (Actor Reference) -> Output: Success (Boolean)"
+    if "spawn" in lowered:
+        return "Input: SpawnContext (Object Reference) -> Output: None"
+    if "ui" in lowered or "widget" in lowered:
+        return "Input: None -> Output: None"
+    if "input" in lowered:
+        return "Input: TriggerValue (Float or Boolean) -> Output: None"
+    return "Input: Context (Object Reference or primitive value) -> Output: None"
+
+
+def infer_material_parameter_name(change_request):
+    lowered = (change_request or "").lower()
+    if "color" in lowered or "tint" in lowered:
+        return "TintColor"
+    if "rough" in lowered:
+        return "Roughness"
+    if "metal" in lowered:
+        return "Metallic"
+    if "glow" in lowered or "emiss" in lowered:
+        return "EmissiveStrength"
+    if "opacity" in lowered or "fade" in lowered:
+        return "Opacity"
+    if "texture" in lowered:
+        return "BaseTexture"
+    return "TunableParameter"
+
+
+def infer_material_parameter_type(change_request):
+    lowered = (change_request or "").lower()
+    if "color" in lowered or "tint" in lowered:
+        return "Vector"
+    if "texture" in lowered:
+        return "Texture"
+    return "Scalar"
+
+
+def infer_behavior_tree_node_kind(change_request):
+    lowered = (change_request or "").lower()
+    if "service" in lowered:
+        return "Service"
+    if "decorator" in lowered or "condition" in lowered:
+        return "Decorator"
+    if "blackboard" in lowered or "key" in lowered:
+        return "Blackboard Key Change"
+    return "Task"
+
+
+def infer_behavior_tree_node_name(change_request, node_kind):
+    lowered = (change_request or "").lower()
+    if "patrol" in lowered:
+        stem = "Patrol"
+    elif "attack" in lowered or "combat" in lowered:
+        stem = "Attack"
+    elif "chase" in lowered or "follow" in lowered:
+        stem = "Chase"
+    elif "target" in lowered:
+        stem = "UpdateTarget"
+    elif "cover" in lowered:
+        stem = "FindCover"
+    else:
+        stem = "RequestedBehavior"
+    prefix = {
+        "Task": "BTTask_",
+        "Service": "BTService_",
+        "Decorator": "BTDecorator_",
+        "Blackboard Key Change": "BB_",
+    }.get(node_kind, "BTTask_")
+    return f"{prefix}{stem}"
+
+
+def chunk_text(text, chunk_size=7000, overlap=400):
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + chunk_size)
+        chunks.append(text[start:end])
+        if end >= len(text):
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
+
+def remember_interaction(question, answer):
+    PROJECT_CACHE["conversation_history"].append(
+        {"question": question[:500], "answer": answer[:1000]}
+    )
+    PROJECT_CACHE["conversation_history"] = PROJECT_CACHE["conversation_history"][-5:]
+
+
+def format_recent_history():
+    items = []
+    if PROJECT_CACHE["current_focus"]:
+        items.append(f"Current focus file: {PROJECT_CACHE['current_focus']}")
+    for item in PROJECT_CACHE["conversation_history"][-3:]:
+        items.append(f"Q: {item['question']}\nA: {item['answer']}")
+    return "\n\n".join(items) if items else "No recent context."
+
+
+def heuristic_log_summary(text, log_type="output"):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    errors = [line for line in lines if "error" in line.lower() or "fatal" in line.lower()]
+    warnings = [line for line in lines if "warning" in line.lower()]
+    stack = [line for line in lines if "::" in line or "!" in line]
+
+    summary = [
+        f"{len(errors)} error/fatal line(s) detected.",
+        f"{len(warnings)} warning line(s) detected.",
+    ]
+    if stack:
+        summary.append("Possible call stack or symbol lines were found.")
+    if log_type == "crash":
+        summary.append("Check the first fatal line and the topmost project-specific stack frame first.")
+    else:
+        summary.append("Prioritize the first real error before later cascading warnings.")
+
+    examples = errors[:5] or warnings[:5] or lines[:5]
+    return " ".join(summary) + "\n\nRelevant lines:\n" + "\n".join(examples)

@@ -1,0 +1,110 @@
+{
+  "version": "0.1.0",
+  "purpose": "Safe Unreal Editor command contract between the UE5 plugin and the FastAPI backend.",
+  "transport": {
+    "plugin_to_backend": "HTTP POST JSON",
+    "backend_to_plugin": "HTTP JSON response",
+    "future_plugin_execution": "Editor-native action handlers invoked only after explicit plugin-side validation"
+  },
+  "envelopes": {
+    "plugin_request": {
+      "command": "string",
+      "request_id": "string",
+      "source": "ue5_plugin",
+      "selection": {
+        "name": "string",
+        "type": "actor|asset|folder|none",
+        "asset_path": "string",
+        "class_name": "string"
+      },
+      "payload": {}
+    },
+    "backend_response": {
+      "request_id": "string",
+      "status": "ok|error|plan_only|unsupported",
+      "message": "string",
+      "payload": {},
+      "editor_action": {
+        "action_type": "string",
+        "dry_run": true,
+        "requires_user_confirmation": true,
+        "arguments": {}
+      }
+    }
+  },
+  "commands": [
+    {
+      "name": "selection_context",
+      "direction": "plugin_to_backend",
+      "description": "Send current editor selection for explanation and asset-aware analysis.",
+      "payload_schema": {
+        "selection_name": "string",
+        "selection_type": "string",
+        "asset_path": "string",
+        "class_name": "string"
+      },
+      "mapped_backend_route": "/plugin/selection-context"
+    },
+    {
+      "name": "deep_asset_analysis",
+      "direction": "plugin_to_backend",
+      "description": "Analyze pasted/exported graph or state text for the current asset.",
+      "payload_schema": {
+        "asset_kind": "string|auto",
+        "exported_text": "string",
+        "selection_name": "string",
+        "asset_path": "string",
+        "class_name": "string"
+      },
+      "mapped_backend_route": "/asset-deep-analysis"
+    },
+    {
+      "name": "asset_scaffold",
+      "direction": "plugin_to_backend",
+      "description": "Generate a safe scaffold plan for a new asset without editor mutation.",
+      "payload_schema": {
+        "asset_kind": "blueprint_class|data_asset|input_action|input_mapping_context",
+        "name": "string",
+        "purpose": "string",
+        "class_name": "string"
+      },
+      "mapped_backend_route": "/asset-scaffold"
+    },
+    {
+      "name": "asset_edit_plan",
+      "direction": "plugin_to_backend",
+      "description": "Generate a controlled edit plan for a selected asset.",
+      "payload_schema": {
+        "selection": "string",
+        "change_request": "string"
+      },
+      "mapped_backend_route": "/asset-edit-plan"
+    },
+    {
+      "name": "execute_editor_action",
+      "direction": "backend_response_to_plugin",
+      "description": "Future safe editor-native action returned by the backend and executed only by the plugin after validation and user confirmation.",
+      "payload_schema": {
+        "action_type": "rename_asset|create_asset|add_input_action|add_blueprint_variable|add_blueprint_function_stub|tweak_material_parameter|modify_behavior_tree",
+        "dry_run": "bool",
+        "requires_user_confirmation": "bool",
+        "arguments": {
+          "asset_path": "string",
+          "new_name": "string",
+          "target_class": "string",
+          "parameter_name": "string",
+          "parameter_type": "string",
+          "node_kind": "string",
+          "node_name": "string"
+        }
+      }
+    }
+  ],
+  "safety_rules": [
+    "The backend may suggest editor_action objects, but the plugin is the final safety gate.",
+    "The plugin must reject any action whose target asset no longer matches the current editor state.",
+    "All mutating actions should support dry_run first.",
+    "Renames and edits should require explicit user confirmation in the plugin UI.",
+    "Binary asset mutation should happen only through Unreal editor APIs, never by direct file patching."
+  ]
+}

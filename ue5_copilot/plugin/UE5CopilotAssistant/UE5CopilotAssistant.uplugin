@@ -1,0 +1,20 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "0.1.0",
+    "FriendlyName": "UE5 Copilot Assistant",
+    "Description": "Dockable editor bridge for the UE5 Copilot FastAPI backend.",
+    "Category": "Editor",
+    "CreatedBy": "Codex",
+    "EnabledByDefault": false,
+    "CanContainContent": false,
+    "IsBetaVersion": true,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "UE5CopilotAssistant",
+            "Type": "Editor",
+            "LoadingPhase": "Default"
+        }
+    ]
+}

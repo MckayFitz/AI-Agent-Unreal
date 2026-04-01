@@ -7,156 +7,194 @@
     <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-    <div class="bg-orb orb-1"></div>
-    <div class="bg-orb orb-2"></div>
-    <div class="bg-grid"></div>
+    <div class="bg-noise"></div>
+    <div class="bg-glow glow-left"></div>
+    <div class="bg-glow glow-right"></div>
 
-    <main class="app-shell">
-        <header class="topbar">
-            <div class="brand-block">
-                <div class="brand-chip">UNREAL ENGINE WORKFLOW</div>
-                <h1>UE5 AI Agent</h1>
-                <p class="subtitle">
-                    Analyze your project, inspect systems, and debug build issues with a cleaner Unreal-style workspace.
+    <main class="chat-app">
+        <header class="app-header">
+            <div class="brand">
+                <span class="brand-tag">UE5 Workspace Assistant</span>
+                <h1>Ask one question at a time.</h1>
+                <p>
+                    Scan your Unreal project once, then use the single box below for questions, errors, file explanations, Blueprint help, and architecture lookups.
                 </p>
+                <div class="hero-pills">
+                    <span>Chat-first layout</span>
+                    <span>Project-aware answers</span>
+                    <span>UE5 debugging tools</span>
+                </div>
             </div>
 
-            <div class="topbar-right">
+            <div class="status-stack">
                 <div class="status-card">
-                    <span class="status-label">API STATUS</span>
+                    <span class="status-label">API Status</span>
                     <span id="apiStatus" class="status-pill">Checking API</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Project Scan</span>
+                    <p id="scanStatus" class="status-copy">No project scanned yet.</p>
                 </div>
             </div>
         </header>
 
-        <section class="hero-strip">
-            <div class="hero-card hero-primary">
-                <span class="hero-kicker">Project Intelligence</span>
-                <h2>Scan your Unreal project and work from real code context.</h2>
-                <p>
-                    Ask questions about systems, classes, modules, files, and build behavior without jumping between windows.
-                </p>
+        <section class="workspace-bar">
+            <div class="workspace-inputs">
+                <label for="projectPath">UE5 project folder</label>
+                <input
+                    id="projectPath"
+                    type="text"
+                    placeholder="C:\Users\YourName\Documents\Unreal Projects\MyGame"
+                />
             </div>
-
-            <div class="hero-card hero-secondary">
-                <span class="hero-kicker">Debug Faster</span>
-                <h2>Paste Unreal or Visual Studio errors and get practical fixes.</h2>
-                <p>
-                    Break down compiler output, identify likely causes, and understand what to fix next.
-                </p>
-            </div>
+            <button id="scanButton" class="primary-btn">Scan Project</button>
         </section>
 
-        <section class="workspace">
-            <aside class="sidebar">
-                <div class="panel panel-elevated">
-                    <div class="panel-header">
-                        <div>
-                            <p class="panel-eyebrow">STEP 01</p>
-                            <h2>Project Scan</h2>
+        <section id="chatThread" class="chat-thread" aria-live="polite">
+            <article class="message assistant-message intro-message">
+                <div class="message-role">Assistant</div>
+                <div class="message-card">
+                    <div class="intro-kicker">Start here</div>
+                    <h2>Use one input for the whole workflow.</h2>
+                    <p>Pick a mode, type what you need, and read the answer here in the thread above the composer.</p>
+                    <div class="intro-grid">
+                        <div class="intro-tile">
+                            <strong>Ask AI</strong>
+                            <span>General questions about your scanned codebase.</span>
                         </div>
-                    </div>
-
-                    <label for="projectPath">UE5 project folder</label>
-                    <input
-                        id="projectPath"
-                        type="text"
-                        placeholder="C:\Users\YourName\Documents\Unreal Projects\MyGame"
-                    />
-
-                    <div class="button-row">
-                        <button id="scanButton" class="primary-btn">Scan Project</button>
-                    </div>
-
-                    <p id="scanStatus" class="helper-text">No project scanned yet.</p>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-header">
-                        <div>
-                            <p class="panel-eyebrow">STEP 02</p>
-                            <h2>Ask About Code</h2>
+                        <div class="intro-tile">
+                            <strong>Explain / Review</strong>
+                            <span>Paste a file path to understand or inspect it.</span>
                         </div>
-                    </div>
-
-                    <label for="questionInput">Question</label>
-                    <textarea
-                        id="questionInput"
-                        rows="6"
-                        placeholder="Where is player movement handled?"
-                    ></textarea>
-
-                    <div class="button-row">
-                        <button id="askButton" class="primary-btn">Ask AI</button>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-header">
-                        <div>
-                            <p class="panel-eyebrow">STEP 03</p>
-                            <h2>Error Analyzer</h2>
-                        </div>
-                    </div>
-
-                    <label for="errorText">Build or compile error</label>
-                    <textarea
-                        id="errorText"
-                        rows="8"
-                        placeholder="Paste Unreal or Visual Studio error output here"
-                    ></textarea>
-
-                    <div class="button-row">
-                        <button onclick="analyzeError()" class="secondary-btn">Analyze Error</button>
-                    </div>
-                </div>
-            </aside>
-
-            <section class="main-panel">
-                <div class="results-grid">
-                    <div class="panel panel-large answer-panel">
-                        <div class="panel-header panel-header-spread">
-                            <div>
-                                <p class="panel-eyebrow">RESULT</p>
-                                <h2>AI Response</h2>
-                            </div>
-                            <span class="panel-badge">Context-Aware</span>
-                        </div>
-
-                        <div id="answerOutput" class="output-box muted-output">
-                            Scan a project, then ask a question about your codebase.
-                        </div>
-                    </div>
-
-                    <div class="panel panel-large error-panel">
-                        <div class="panel-header panel-header-spread">
-                            <div>
-                                <p class="panel-eyebrow">DEBUG</p>
-                                <h2>Error Analysis</h2>
-                            </div>
-                            <span class="panel-badge">Compiler / Build</span>
-                        </div>
-
-                        <div id="errorAnalysisBox" class="output-box muted-output">
-                            Paste an Unreal or Visual Studio error to get a breakdown and likely fix.
+                        <div class="intro-tile">
+                            <strong>Debugging</strong>
+                            <span>Paste build errors, crash logs, or output logs.</span>
                         </div>
                     </div>
                 </div>
+            </article>
+        </section>
 
-                <div class="panel panel-wide">
-                    <div class="panel-header panel-header-spread">
-                        <div>
-                            <p class="panel-eyebrow">CONTEXT</p>
-                            <h2>Retrieved Files & Snippets</h2>
-                        </div>
-                        <span class="panel-badge">Search Matches</span>
+        <section class="composer-shell">
+            <div class="composer-panel">
+                <div class="composer-toprow">
+                    <div class="field-group">
+                        <label for="actionSelect">Mode</label>
+                        <select id="actionSelect">
+                            <option value="ask">Ask AI</option>
+                            <option value="task">Task Workflow</option>
+                            <option value="error">Analyze Error</option>
+                            <option value="crash">Analyze Crash Log</option>
+                            <option value="outputLog">Summarize Output Log</option>
+                            <option value="references">Find References</option>
+                            <option value="assetDetails">Explain Asset</option>
+                            <option value="assetScaffold">Generate Asset Scaffold</option>
+                            <option value="assetEditPlan">Edit Asset Values</option>
+                            <option value="explainFile">Explain File</option>
+                            <option value="reviewFile">Review File</option>
+                            <option value="blueprintLinks">Blueprint Links</option>
+                            <option value="architecture">Architecture Map</option>
+                            <option value="selection">Analyze Selection</option>
+                            <option value="blueprintAwareness">Blueprint Awareness</option>
+                            <option value="assetFamily">Inspect Asset Family</option>
+                            <option value="blueprintNodes">Explain Blueprint Nodes</option>
+                            <option value="deepAsset">Deep Asset Analysis</option>
+                            <option value="folder">Explain Folder</option>
+                            <option value="dependency">Dependency Map</option>
+                            <option value="reflection">Analyze Reflection</option>
+                        </select>
                     </div>
 
-                    <div id="matchesOutput" class="output-box muted-output">
-                        Matching files and snippets will appear here after you ask a question.
+                    <div class="field-group inline-field">
+                        <label for="explainMode">Explain mode</label>
+                        <select id="explainMode">
+                            <option value="beginner">Beginner</option>
+                            <option value="technical">Technical</option>
+                            <option value="refactor">Refactor Notes</option>
+                        </select>
                     </div>
                 </div>
-            </section>
+
+                <div class="mode-guide">
+                    <div>
+                        <div id="modeHelpTitle" class="mode-guide-title">Ask AI</div>
+                        <p id="modeHelpText" class="mode-guide-copy">Ask a general question about the scanned project and get a context-aware answer.</p>
+                    </div>
+                    <div>
+                        <div class="mode-guide-title">Example</div>
+                        <p id="modeHelpExample" class="mode-guide-copy">How does my weapon system work?</p>
+                    </div>
+                </div>
+
+                <textarea
+                    id="promptInput"
+                    rows="5"
+                    placeholder="Ask about your project, paste an error, enter a class name, or provide the file/folder you want explained."
+                ></textarea>
+
+                <details class="advanced-panel">
+                    <summary>Advanced Options</summary>
+                    <div class="advanced-grid">
+                        <div class="field-group">
+                            <label for="filePathInput">File path</label>
+                            <input id="filePathInput" type="text" placeholder="Used for explain, review, or reflection" />
+                        </div>
+                        <div class="field-group">
+                            <label for="selectionInput">Selection / asset / symbol</label>
+                            <input id="selectionInput" type="text" placeholder="Optional selection context" />
+                        </div>
+                        <div class="field-group">
+                            <label for="classLinkInput">C++ class name</label>
+                            <input id="classLinkInput" type="text" placeholder="Optional Blueprint link context" />
+                        </div>
+                        <div class="field-group">
+                            <label for="folderPathInput">Folder path</label>
+                            <input id="folderPathInput" type="text" placeholder="Used for folder explanation" />
+                        </div>
+                        <div class="field-group">
+                            <label for="assetFamilySelect">Asset family</label>
+                            <select id="assetFamilySelect">
+                                <option value="blueprints">Blueprints</option>
+                                <option value="enhanced_input">Enhanced Input</option>
+                                <option value="behavior_trees">Behavior Trees</option>
+                                <option value="data_assets">DataAssets</option>
+                                <option value="materials">Materials</option>
+                                <option value="animbps">AnimBPs</option>
+                                <option value="state_trees">StateTrees</option>
+                                <option value="control_rig">Control Rig</option>
+                                <option value="niagara">Niagara</option>
+                                <option value="eqs">EQS</option>
+                                <option value="sequencer">Sequencer</option>
+                            </select>
+                        </div>
+                        <div class="field-group">
+                            <label for="assetScaffoldKindSelect">Scaffold kind</label>
+                            <select id="assetScaffoldKindSelect">
+                                <option value="blueprint_class">Blueprint Class</option>
+                                <option value="data_asset">DataAsset</option>
+                                <option value="input_action">Input Action</option>
+                                <option value="input_mapping_context">Input Mapping Context</option>
+                            </select>
+                        </div>
+                        <div class="field-group">
+                            <label for="deepAssetKindSelect">Deep asset kind</label>
+                            <select id="deepAssetKindSelect">
+                                <option value="auto">Auto-detect</option>
+                                <option value="blueprint">Blueprint</option>
+                                <option value="material">Material</option>
+                                <option value="behavior_tree">Behavior Tree</option>
+                                <option value="enhanced_input">Enhanced Input</option>
+                                <option value="animbp">AnimBP</option>
+                            </select>
+                        </div>
+                    </div>
+                </details>
+
+                <div class="composer-actions">
+                    <div class="composer-hint">Press Ctrl/Cmd + Enter to submit</div>
+                    <button id="submitButton" class="primary-btn">Send</button>
+                </div>
+            </div>
         </section>
     </main>
 
