@@ -2189,42 +2189,151 @@ def analyze_deep_asset(asset_kind, exported_text, selection_name="", class_name=
     return result
 
 
+def extract_reflected_properties(lines):
+    properties = []
+    for line in lines:
+        if not line.startswith("Property: "):
+            continue
+        payload = line[len("Property: "):]
+        name_and_type, _, value = payload.partition("=")
+        prop_name, _, prop_type = name_and_type.partition("[")
+        properties.append(
+            {
+                "name": prop_name.strip(),
+                "type": prop_type.rstrip("] ").strip(),
+                "value": value.strip(),
+            }
+        )
+    return properties
+
+
 def analyze_blueprint_export(lines, text):
     nodes = extract_prefixed_items(lines, ("Event", "Branch", "Sequence", "Delay", "Cast", "Set ", "Get ", "Spawn", "Call "))
     events = [line for line in lines if "event" in line.lower()][:8]
+    reflected_properties = extract_reflected_properties(lines)
+    structured_blueprint_lines = [
+        line for line in lines
+        if line.startswith("Blueprint Asset:") or line.startswith("Blueprint Class:") or line.startswith("Blueprint Property:")
+    ]
     missing = []
     wrong = []
     lowered = text.lower()
-    if "branch" not in lowered and "if" not in lowered:
+    if "branch" not in lowered and "if" not in lowered and not reflected_properties and not structured_blueprint_lines:
         missing.append("No obvious branching/guard logic was detected in the exported Blueprint text.")
     if "cast" in lowered and "is valid" not in lowered:
         wrong.append("Cast nodes appear present without obvious validity guarding.")
     if "delay" in lowered:
         wrong.append("Delay nodes can hide ordering bugs if this Blueprint controls gameplay-critical flow.")
+
+    summary = "This Blueprint appears to coordinate gameplay logic through graph execution and object/property access."
+    key_elements = nodes[:12]
+    flow_summary = events + nodes[:6]
+
+    if structured_blueprint_lines:
+        property_lines = [line for line in structured_blueprint_lines if line.startswith("Blueprint Property:")]
+        key_elements = dedupe_preserve_order(property_lines + key_elements)[:12]
+        flow_summary = dedupe_preserve_order(structured_blueprint_lines[:8] + flow_summary)[:8]
+        summary = "This Blueprint appears to come from structured plugin-side Blueprint fallback data rather than a pasted graph export."
+        if property_lines:
+            property_names = [line.split(":", 1)[1].split("=", 1)[0].strip() for line in property_lines[:3]]
+            summary += f" Blueprint properties like {', '.join(property_names)} give clues about runtime state and collaborators."
+        if not any(any(token in line.lower() for token in ("state", "active", "enabled", "visible")) for line in property_lines):
+            missing.append("The structured Blueprint fallback did not surface obvious state-style properties.")
+        if not any(any(token in line.lower() for token in ("target", "owner", "component", "widget")) for line in property_lines):
+            missing.append("The structured Blueprint fallback did not surface obvious collaborator/reference properties.")
+
+    if reflected_properties:
+        blueprint_properties = [
+            item for item in reflected_properties
+            if any(token in item["name"].lower() for token in ("state", "target", "owner", "component", "widget", "class", "tag", "enabled", "visible", "active", "speed", "health", "sprint", "move", "weapon", "interact"))
+        ]
+        key_lines = [
+            f"{item['name']}: {item['value']}"
+            for item in blueprint_properties[:12]
+        ]
+        key_elements = dedupe_preserve_order(key_lines + key_elements)[:12]
+        flow_summary = dedupe_preserve_order(
+            [f"Property-driven context: {item['name']} = {item['value']}" for item in blueprint_properties[:8]] + flow_summary
+        )[:8]
+
+        property_names = [item["name"].lower() for item in reflected_properties]
+        summary = "This Blueprint appears to come from reflected Unreal property data rather than a pasted graph export."
+        if blueprint_properties:
+            summary += f" Exposed properties such as {', '.join(item['name'] for item in blueprint_properties[:3])} give clues about the Blueprint's runtime role."
+
+        if not any(name.startswith(("b", "is", "has")) or "state" in name for name in property_names):
+            missing.append("No obvious state or guard-style properties were surfaced from the reflected Blueprint data.")
+        if not any(token in name for name in property_names for token in ("component", "target", "owner", "widget")):
+            missing.append("No obvious owner/reference-style properties were surfaced, so the Blueprint's collaborators may still be implicit.")
+        if any("class" in item["name"].lower() and item["value"] in {"None", ""} for item in reflected_properties):
+            wrong.append("A class-related Blueprint property appears unset in the reflected data, which can hide spawn or ownership issues.")
+
     return {
-        "summary": "This Blueprint appears to coordinate gameplay logic through graph execution and object/property access.",
-        "key_elements": nodes[:12],
-        "flow_summary": events + nodes[:6],
-        "what_looks_wrong": wrong,
-        "what_is_missing": missing,
+        "summary": summary,
+        "key_elements": key_elements,
+        "flow_summary": flow_summary,
+        "what_looks_wrong": dedupe_preserve_order(wrong),
+        "what_is_missing": dedupe_preserve_order(missing),
     }
 
 
 def analyze_material_export(lines, text):
     params = [line for line in lines if any(word in line.lower() for word in ("parameter", "scalar", "vector", "texture", "lerp", "multiply"))][:12]
+    reflected_properties = extract_reflected_properties(lines)
+    structured_material_lines = [
+        line for line in lines
+        if line.startswith("Material Instance:") or line.startswith("Parent Material:") or line.startswith("Scalar Parameter:") or line.startswith("Vector Parameter:") or line.startswith("Texture Parameter:") or line.startswith("Material Reference:")
+    ]
     wrong = []
     missing = []
     lowered = text.lower()
-    if "parameter" not in lowered:
+    if "parameter" not in lowered and not any("parameter" in item["name"].lower() for item in reflected_properties) and not structured_material_lines:
         missing.append("No obvious parameter nodes were detected, so runtime tuning hooks may be limited.")
     if lowered.count("texture") > 3 and "parameter" not in lowered:
         wrong.append("This material may be texture-heavy without clear parameterization for runtime control.")
+
+    summary = "This material appears to define visual output through texture/math/parameter nodes."
+    key_elements = params
+    flow_summary = params[:8]
+
+    if structured_material_lines:
+        key_elements = dedupe_preserve_order(structured_material_lines + key_elements)[:12]
+        flow_summary = dedupe_preserve_order(structured_material_lines[:8] + flow_summary)[:8]
+        summary = "This material appears to come from structured plugin-side material fallback data rather than a pasted graph export."
+        if not any("parent material" in line.lower() for line in structured_material_lines):
+            missing.append("The structured material fallback did not surface a parent material reference.")
+        if not any(any(token in line.lower() for token in ("scalar parameter", "vector parameter", "texture parameter")) for line in structured_material_lines):
+            missing.append("The structured material fallback did not surface any obvious parameter-style entries.")
+
+    if reflected_properties:
+        material_properties = [
+            item for item in reflected_properties
+            if any(token in item["name"].lower() for token in ("parameter", "texture", "material", "rough", "metal", "emiss", "opacity", "color", "base", "normal"))
+        ]
+        key_lines = [f"{item['name']}: {item['value']}" for item in material_properties[:12]]
+        key_elements = dedupe_preserve_order(key_lines + key_elements)[:12]
+        flow_summary = dedupe_preserve_order(
+            [f"Material property context: {item['name']} = {item['value']}" for item in material_properties[:8]] + flow_summary
+        )[:8]
+
+        property_names = [item["name"].lower() for item in reflected_properties]
+        summary = "This material appears to come from reflected Unreal property data rather than a pasted graph export."
+        if material_properties:
+            summary += f" Reflected properties such as {', '.join(item['name'] for item in material_properties[:3])} hint at the material's tunable surface inputs."
+
+        if not any("parameter" in name for name in property_names):
+            missing.append("No obvious parameter-style properties were surfaced from the reflected material data.")
+        if not any(token in name for name in property_names for token in ("texture", "base", "normal")):
+            missing.append("No obvious texture/reference-style properties were surfaced, so the material input chain may still be unclear.")
+        if any("texture" in item["name"].lower() and item["value"] in {"None", ""} for item in reflected_properties):
+            wrong.append("A texture-related material property appears unset in the reflected data, which can hide broken visual inputs.")
+
     return {
-        "summary": "This material appears to define visual output through texture/math/parameter nodes.",
-        "key_elements": params,
-        "flow_summary": params[:8],
-        "what_looks_wrong": wrong,
-        "what_is_missing": missing,
+        "summary": summary,
+        "key_elements": key_elements,
+        "flow_summary": flow_summary,
+        "what_looks_wrong": dedupe_preserve_order(wrong),
+        "what_is_missing": dedupe_preserve_order(missing),
     }
 
 
@@ -2250,21 +2359,53 @@ def analyze_behavior_tree_export(lines, text):
 
 def analyze_input_export(lines, text):
     actions = [line for line in lines if any(word in line.lower() for word in ("input action", "mapping", "trigger", "modifier", "action", "context"))][:12]
+    reflected_properties = extract_reflected_properties(lines)
     wrong = []
     missing = []
     lowered = text.lower()
-    if "mapping" not in lowered:
+    if "mapping" not in lowered and not any("mapping" in item["name"].lower() for item in reflected_properties):
         missing.append("No obvious mapping context information was detected.")
-    if "trigger" not in lowered:
+    if "trigger" not in lowered and not any("trigger" in item["name"].lower() for item in reflected_properties):
         missing.append("No trigger information was detected, so input timing rules may be unclear.")
-    if lowered.count("action") > 0 and "context" not in lowered:
+    if lowered.count("action") > 0 and "context" not in lowered and not any("context" in item["name"].lower() for item in reflected_properties):
         wrong.append("Input actions appear present without clear mapping context ownership.")
+
+    summary = "This input asset appears to define actions, mappings, and trigger/modifier behavior for player input."
+    if reflected_properties:
+        action_names = [item["value"] for item in reflected_properties if "action" in item["name"].lower() and item["value"] not in {"None", ""}]
+        mapping_names = [item["value"] for item in reflected_properties if "mapping" in item["name"].lower() and item["value"] not in {"None", ""}]
+        trigger_names = [item["value"] for item in reflected_properties if "trigger" in item["name"].lower() and item["value"] not in {"None", ""}]
+        modifier_names = [item["value"] for item in reflected_properties if "modifier" in item["name"].lower() and item["value"] not in {"None", ""}]
+
+        parts = ["This input asset appears to come from reflected Unreal property data"]
+        if action_names:
+            parts.append(f"with action-related values such as {', '.join(action_names[:2])}.")
+        elif mapping_names:
+            parts.append(f"with mapping-related values such as {', '.join(mapping_names[:2])}.")
+        else:
+            parts.append("rather than a pasted export.")
+        summary = " ".join(parts)
+
+        key_lines = [
+            f"{item['name']}: {item['value']}"
+            for item in reflected_properties
+            if any(token in item["name"].lower() for token in ("action", "mapping", "trigger", "modifier"))
+        ]
+        actions = dedupe_preserve_order(key_lines + actions)[:12]
+
+        if mapping_names and not trigger_names and not any("trigger" in line.lower() for line in lines):
+            missing.append("Mapping-related properties were detected, but no clear trigger configuration was surfaced from the reflected asset data.")
+        if action_names and not mapping_names and "input action" in lowered:
+            wrong.append("This looks like an Input Action payload without a visible owning Mapping Context, so runtime hookup still needs verification.")
+        if modifier_names and not trigger_names:
+            missing.append("Modifier-related properties were detected without obvious trigger data, so timing and activation behavior may still be unclear.")
+
     return {
-        "summary": "This input asset appears to define actions, mappings, and trigger/modifier behavior for player input.",
+        "summary": summary,
         "key_elements": actions,
         "flow_summary": actions[:8],
-        "what_looks_wrong": wrong,
-        "what_is_missing": missing,
+        "what_looks_wrong": dedupe_preserve_order(wrong),
+        "what_is_missing": dedupe_preserve_order(missing),
     }
 
 

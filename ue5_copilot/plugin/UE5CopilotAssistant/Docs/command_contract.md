@@ -8,6 +8,7 @@ Today the plugin already sends:
 - selection context requests
 - deep asset analysis requests
 - free-form ask requests
+- scaffold requests for create-ready asset plans
 
 The backend also supports plan-oriented routes for:
 - asset scaffolds
@@ -17,6 +18,7 @@ Current backend family coverage now includes:
 - `Blueprints`
 - `AnimBPs`
 - `Materials`
+- `Material Instances`
 - `Behavior Trees`
 - `Enhanced Input`
 - `DataAssets`
@@ -30,7 +32,7 @@ Current backend family coverage now includes:
 - `Motion Matching`
 - `IK Rig`
 
-Those newer flows are still web-app-first and plan-only. The plugin does not execute editor mutations yet.
+Those newer flows began as web-app-first and plan-only, but the plugin now executes a narrow safe subset of editor actions after preview and confirmation.
 
 ## Contract shape
 
@@ -64,6 +66,7 @@ Phase C: confirmed execution
 - `rename_asset`
 - `create_asset`
 - `add_input_action`
+- `create_material_instance`
 - `add_blueprint_variable`
 - `add_blueprint_function_stub`
 - `tweak_material_parameter`
@@ -88,6 +91,14 @@ The backend currently exposes these planning and analysis routes for plugin use:
 - `/asset-deep-analysis`
 
 The backend can already return scaffold, inspection, and edit-plan payloads for the supported asset families listed above. Plugin-side mutation and confirmation UX is still the next phase.
+
+The plugin currently executes these safe editor actions:
+- `rename_asset`
+- `create_asset` for `blueprint_class`
+- `create_asset` for `input_action`
+- `create_asset` for `input_mapping_context`
+- `create_asset` for `material_instance`
+- `tweak_material_parameter` for selected `material_instance` assets when the backend can infer a concrete scalar or vector value
 
 ## Example flow
 

@@ -70,6 +70,7 @@ const SCAFFOLD_KIND_HELP = {
     animbp: { example: "ABP_PlayerLocomotion", note: "Best when you want a starter animation-state plan instead of graph generation." },
     data_asset: { example: "DA_WeaponStats", note: "Use this for designer-editable config assets and strongly-owned data." },
     material: { example: "M_WeaponGlow", note: "Starts with a small parameterized material plan you can later instance." },
+    material_instance: { example: "MI_WeaponGlow", note: "Best for a variant that should reuse a stable base material and only override a few parameters." },
     behavior_tree: { example: "BT_EnemyCombat", note: "Creates a Behavior Tree plus Blackboard-oriented starter plan." },
     input_action: { example: "IA_Sprint", note: "Good for a single Enhanced Input action with minimal assumptions." },
     input_mapping_context: { example: "IMC_PlayerDefault", note: "Use this when you need a context-level binding plan." },

@@ -11,13 +11,15 @@ public:
     virtual void ShutdownModule() override;
 
 private:
+    void LoadSettings();
+    void SaveSettings() const;
     void HandleBackendBaseUrlChanged(const FText& NewText);
     void RegisterMenus();
     TSharedRef<class FExtender> OnExtendContentBrowserAssetSelectionMenu(const TArray<FAssetData>& SelectedAssets);
     void AddAssetContextMenuEntries(class FMenuBuilder& MenuBuilder, TArray<FAssetData> SelectedAssets);
     void OpenAssistantTab();
-    void RequestAssetDetailsForSelection(const FAssetData& AssetData);
-    void RequestAssetEditPlanForSelection(const FAssetData& AssetData);
+    void RequestAssetDetailsForSelection(FAssetData AssetData);
+    void RequestAssetEditPlanForSelection(FAssetData AssetData);
     TSharedRef<class SDockTab> SpawnAssistantTab(const class FSpawnTabArgs& SpawnTabArgs);
 
     FString CurrentBackendBaseUrl = TEXT("http://127.0.0.1:8000");

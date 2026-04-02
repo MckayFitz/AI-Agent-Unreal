@@ -562,6 +562,130 @@ class AssetAnalysisTests(unittest.TestCase):
         self.assertEqual(result["selection_type"], "asset")
         self.assertEqual(result["resolved_asset_name"], "BP_PlayerCharacter")
 
+    def test_enhanced_input_deep_analysis_understands_reflected_property_payload(self):
+        result = analyze_deep_asset(
+            asset_kind="enhanced_input",
+            exported_text="""
+                Selected Asset: IA_Sprint
+                Asset Class: InputAction
+                Asset Path: /Game/Input/Actions/IA_Sprint.IA_Sprint
+                Loaded Class: InputAction
+                Property: ValueType [ByteProperty] = Digital
+                Property: Triggers [ArrayProperty] = (InputTriggerPressed)
+                Property: Modifiers [ArrayProperty] = None
+            """,
+            selection_name="IA_Sprint",
+        )
+
+        self.assertEqual(result["asset_kind"], "enhanced_input")
+        self.assertTrue(result["key_elements"])
+        self.assertIn("reflected Unreal property data", result["summary"])
+        self.assertFalse(any("No trigger information" in item for item in result["what_is_missing"]))
+
+    def test_enhanced_input_deep_analysis_understands_structured_plugin_fallback_lines(self):
+        result = analyze_deep_asset(
+            asset_kind="enhanced_input",
+            exported_text="""
+                Selected Asset: IA_Sprint
+                Asset Class: InputAction
+                Asset Path: /Game/Input/Actions/IA_Sprint.IA_Sprint
+                Loaded Class: InputAction
+                Input Action: IA_Sprint
+                Value Type: Digital
+                Trigger: (InputTriggerPressed)
+                Modifier: None
+            """,
+            selection_name="IA_Sprint",
+        )
+
+        self.assertEqual(result["asset_kind"], "enhanced_input")
+        self.assertTrue(result["key_elements"])
+        self.assertFalse(any("No trigger information" in item for item in result["what_is_missing"]))
+        self.assertTrue(any("Trigger" in item for item in result["key_elements"]))
+
+    def test_blueprint_deep_analysis_understands_reflected_property_payload(self):
+        result = analyze_deep_asset(
+            asset_kind="blueprint",
+            exported_text="""
+                Selected Asset: BP_PlayerCharacter
+                Asset Class: Blueprint
+                Asset Path: /Game/Blueprints/BP_PlayerCharacter.BP_PlayerCharacter
+                Loaded Class: BlueprintGeneratedClass
+                Property: bIsSprinting [BoolProperty] = true
+                Property: TargetActor [ObjectProperty] = BP_Enemy_C_0
+                Property: Health [FloatProperty] = 100.0
+            """,
+            selection_name="BP_PlayerCharacter",
+        )
+
+        self.assertEqual(result["asset_kind"], "blueprint")
+        self.assertTrue(result["key_elements"])
+        self.assertIn("reflected Unreal property data", result["summary"])
+        self.assertTrue(any("bIsSprinting" in item for item in result["key_elements"]))
+
+    def test_blueprint_deep_analysis_understands_structured_plugin_fallback_lines(self):
+        result = analyze_deep_asset(
+            asset_kind="blueprint",
+            exported_text="""
+                Selected Asset: BP_PlayerCharacter
+                Asset Class: Blueprint
+                Asset Path: /Game/Blueprints/BP_PlayerCharacter.BP_PlayerCharacter
+                Loaded Class: BlueprintGeneratedClass
+                Blueprint Asset: BP_PlayerCharacter
+                Blueprint Class: BlueprintGeneratedClass
+                Blueprint Property: bIsSprinting = true
+                Blueprint Property: TargetActor = BP_Enemy_C_0
+                Blueprint Property: Health = 100.0
+            """,
+            selection_name="BP_PlayerCharacter",
+        )
+
+        self.assertEqual(result["asset_kind"], "blueprint")
+        self.assertTrue(result["key_elements"])
+        self.assertIn("structured plugin-side Blueprint fallback data", result["summary"])
+        self.assertTrue(any("Blueprint Property: bIsSprinting" in item for item in result["key_elements"]))
+
+    def test_material_deep_analysis_understands_reflected_property_payload(self):
+        result = analyze_deep_asset(
+            asset_kind="material",
+            exported_text="""
+                Selected Asset: M_WeaponGlow
+                Asset Class: Material
+                Asset Path: /Game/Materials/M_WeaponGlow.M_WeaponGlow
+                Loaded Class: Material
+                Property: BaseColorParameter [StructProperty] = TintColor
+                Property: RoughnessParameter [FloatProperty] = 0.4
+                Property: BaseTexture [ObjectProperty] = T_WeaponAlbedo
+            """,
+            selection_name="M_WeaponGlow",
+        )
+
+        self.assertEqual(result["asset_kind"], "material")
+        self.assertTrue(result["key_elements"])
+        self.assertIn("reflected Unreal property data", result["summary"])
+        self.assertTrue(any("BaseTexture" in item for item in result["key_elements"]))
+
+    def test_material_deep_analysis_understands_structured_material_instance_fallback_lines(self):
+        result = analyze_deep_asset(
+            asset_kind="material",
+            exported_text="""
+                Selected Asset: MI_WeaponGlow
+                Asset Class: MaterialInstanceConstant
+                Asset Path: /Game/Materials/Instances/MI_WeaponGlow.MI_WeaponGlow
+                Loaded Class: MaterialInstanceConstant
+                Material Instance: MI_WeaponGlow
+                Parent Material: M_WeaponBase
+                Scalar Parameter: RoughnessOverride
+                Texture Parameter: T_WeaponAlbedo
+            """,
+            selection_name="MI_WeaponGlow",
+        )
+
+        self.assertEqual(result["asset_kind"], "material")
+        self.assertTrue(result["key_elements"])
+        self.assertTrue(any("Parent Material" in item for item in result["flow_summary"]))
+        self.assertFalse(any("No obvious texture/reference-style properties" in item for item in result["what_is_missing"]))
+
 
 if __name__ == "__main__":
     unittest.main()

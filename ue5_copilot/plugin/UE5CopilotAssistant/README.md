@@ -6,7 +6,7 @@ What it includes:
 - Editor module
 - Dockable tab under `Window`
 - Content Browser right-click actions for selected assets
-- Backend base URL input
+- Backend base URL input with per-project persistence
 - Prompt box
 - Asset scaffold planner inputs
 - Deep asset text box
@@ -19,6 +19,7 @@ What it includes:
 - Selected asset edit-plan payload `POST` to the backend `/plugin/asset-edit-plan` route
 - Asset scaffold payload `POST` to the backend `/asset-scaffold` route
 - Deep asset analysis payload `POST` to the backend `/asset-deep-analysis` route
+- Reflected deep-analysis fallback synthesized from the current selected asset's class and interesting properties when no graph/state export text is pasted
 - Structured response formatting for scaffold plans, edit plans, and deep-analysis summaries
 - Read-only preview output for future backend `editor_action` dry runs
 - Confirmation buttons for acting on previewed editor actions
@@ -53,12 +54,14 @@ What that means in practice:
 
 What the plugin does not do yet:
 - It does not execute general asset mutations yet.
-- It only applies the narrow `rename_asset` action today; other backend-proposed editor actions are still preview-only.
-- It still relies on pasted/exported graph or state text for deep asset analysis rather than extracting that data directly from Unreal assets.
+- It only applies a narrow set of editor actions today: `rename_asset`, Blueprint-class `create_asset`, `input_action` `create_asset`, `input_mapping_context` `create_asset`, `material_instance` `create_asset`, and narrow `tweak_material_parameter` updates for selected Material Instances. Those parameter tweaks currently support scalar, vector, and texture values when the backend can infer a concrete value. Other backend-proposed editor actions are still preview-only.
+- Deep asset analysis is still best when you paste/export graph or state text; when you do not, the plugin now falls back to reflected selected-asset properties instead of sending an empty request.
 - Most editor action previews are informational only right now and do not validate or apply anything yet.
 
 Current execution status:
 - The plugin now includes the first confirmation-and-apply path for `rename_asset`.
+- It also includes confirmation-and-apply paths for scaffolded Blueprint-class, Input Action, Input Mapping Context, and Material Instance `create_asset` actions.
+- It now includes a confirmation-and-apply path for narrow Material Instance scalar/vector parameter tweaks when the backend can infer a concrete value.
 - Other `editor_action` types are still preview-only until dedicated validation and execution handlers are added.
 
 The intended next step is a dry-run and confirmation flow where the backend can suggest an `editor_action`, and the plugin validates and executes it through Unreal editor APIs.

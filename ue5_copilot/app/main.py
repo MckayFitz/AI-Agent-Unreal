@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -13,6 +14,7 @@ from openai import OpenAI
 from app.file_indexer import scan_project
 from app.asset_actions import run_asset_action
 from app.code_reader import search_files
+from app.plugin_routes import build_plugin_router
 from app.search_index import build_search_index
 from app.prompts import (
     CRASH_LOG_SYSTEM_PROMPT,
@@ -112,40 +114,6 @@ class TaskRequest(BaseModel):
 
 class AssetFamilyRequest(BaseModel):
     family: str
-
-
-class AssetDetailRequest(BaseModel):
-    selection: str
-
-
-class AssetScaffoldRequest(BaseModel):
-    asset_kind: str
-    name: str
-    purpose: str | None = None
-    class_name: str | None = None
-
-
-class AssetEditRequest(BaseModel):
-    selection: str
-    change_request: str
-
-
-class PluginSelectionRequest(BaseModel):
-    selection_name: str | None = None
-    selection_type: str | None = None
-    asset_path: str | None = None
-    class_name: str | None = None
-    change_request: str | None = None
-    source: str | None = None
-
-
-class DeepAssetAnalysisRequest(BaseModel):
-    asset_kind: str = ""
-    exported_text: str | None = None
-    selection_name: str | None = None
-    class_name: str | None = None
-    asset_path: str | None = None
-    source: str | None = None
 
 
 @app.get("/")
@@ -491,234 +459,6 @@ def selection_analysis(request: SelectionRequest):
         "blueprint_links": blueprint_result,
         "assets": asset_matches[:8],
     }
-
-
-@app.post("/asset-details")
-def asset_details(request: AssetDetailRequest):
-    return run_asset_action(
-        "asset_details",
-        analysis=PROJECT_CACHE["analysis"],
-        selection=request.selection,
-    )
-
-
-@app.post("/plugin/asset-details")
-def plugin_asset_details(request: PluginSelectionRequest):
-    return run_asset_action(
-        "plugin_asset_details",
-        analysis=PROJECT_CACHE["analysis"],
-        selection_name=request.selection_name or "",
-        asset_path=request.asset_path or "",
-        class_name=request.class_name or "",
-        source=request.source or "plugin",
-    )
-
-
-@app.post("/asset-scaffold")
-def asset_scaffold(request: AssetScaffoldRequest):
-    asset_kind = request.asset_kind.strip().lower()
-    name = request.name.strip()
-    purpose = (request.purpose or "").strip()
-    class_name = (request.class_name or "").strip()
-
-    if not asset_kind:
-        return {"error": "Choose an asset kind first."}
-    if not name:
-        return {"error": "Provide an asset name first."}
-
-    aliases = {
-        "blueprint": "blueprint_class",
-        "blueprint_class": "blueprint_class",
-        "bp": "blueprint_class",
-        "animbp": "animbp",
-        "animation_blueprint": "animbp",
-        "dataasset": "data_asset",
-        "data_asset": "data_asset",
-        "material": "material",
-        "mat": "material",
-        "behavior_tree": "behavior_tree",
-        "behaviortree": "behavior_tree",
-        "bt": "behavior_tree",
-        "input_action": "input_action",
-        "inputaction": "input_action",
-        "input_mapping_context": "input_mapping_context",
-        "inputmappingcontext": "input_mapping_context",
-        "mapping_context": "input_mapping_context",
-        "imc": "input_mapping_context",
-        "state_tree": "state_tree",
-        "statetree": "state_tree",
-        "control_rig": "control_rig",
-        "controlrig": "control_rig",
-        "niagara": "niagara",
-        "niagara_system": "niagara",
-        "eqs": "eqs",
-        "env_query": "eqs",
-        "sequencer": "sequencer",
-        "level_sequence": "sequencer",
-        "metasound": "metasound",
-        "meta_sound": "metasound",
-        "pcg": "pcg",
-        "motion_matching": "motion_matching",
-        "motionmatching": "motion_matching",
-        "ik_rig": "ik_rig",
-        "ikrig": "ik_rig",
-    }
-    resolved = aliases.get(asset_kind, asset_kind)
-
-    if resolved == "blueprint_class":
-        return build_blueprint_class_scaffold(name=name, purpose=purpose, class_name=class_name)
-    if resolved == "data_asset":
-        return build_data_asset_scaffold(name=name, purpose=purpose, class_name=class_name)
-    if resolved == "animbp":
-        return build_animbp_scaffold(name=name, purpose=purpose, class_name=class_name)
-    if resolved == "material":
-        return build_material_scaffold(name=name, purpose=purpose)
-    if resolved == "behavior_tree":
-        return build_behavior_tree_scaffold(name=name, purpose=purpose)
-    if resolved == "input_action":
-        return build_input_action_scaffold(name=name, purpose=purpose)
-    if resolved == "input_mapping_context":
-        return build_input_mapping_context_scaffold(name=name, purpose=purpose)
-    if resolved == "state_tree":
-        return build_state_tree_scaffold(name=name, purpose=purpose)
-    if resolved == "control_rig":
-        return build_control_rig_scaffold(name=name, purpose=purpose)
-    if resolved == "niagara":
-        return build_niagara_scaffold(name=name, purpose=purpose)
-    if resolved == "eqs":
-        return build_eqs_scaffold(name=name, purpose=purpose)
-    if resolved == "sequencer":
-        return build_sequencer_scaffold(name=name, purpose=purpose)
-    if resolved == "metasound":
-        return build_metasound_scaffold(name=name, purpose=purpose)
-    if resolved == "pcg":
-        return build_pcg_scaffold(name=name, purpose=purpose)
-    if resolved == "motion_matching":
-        return build_motion_matching_scaffold(name=name, purpose=purpose)
-    if resolved == "ik_rig":
-        return build_ik_rig_scaffold(name=name, purpose=purpose)
-
-    return {"error": "Scaffolding currently supports blueprint_class, animbp, data_asset, material, behavior_tree, input_action, input_mapping_context, state_tree, control_rig, niagara, eqs, sequencer, metasound, pcg, motion_matching, and ik_rig."}
-
-
-@app.post("/asset-edit-plan")
-def asset_edit_plan(request: AssetEditRequest):
-    return run_asset_action(
-        "asset_edit_plan",
-        analysis=PROJECT_CACHE["analysis"],
-        selection=request.selection,
-        change_request=request.change_request,
-        looks_like_rename_request=looks_like_rename_request,
-        looks_like_function_request=looks_like_function_request,
-        build_asset_rename_edit_plan=build_asset_rename_edit_plan,
-        build_data_asset_edit_plan=build_data_asset_edit_plan,
-        build_enhanced_input_edit_plan=build_enhanced_input_edit_plan,
-        build_behavior_tree_edit_plan=build_behavior_tree_edit_plan,
-        build_material_edit_plan=build_material_edit_plan,
-        build_animbp_edit_plan=build_animbp_edit_plan,
-        build_state_tree_edit_plan=build_state_tree_edit_plan,
-        build_control_rig_edit_plan=build_control_rig_edit_plan,
-        build_niagara_edit_plan=build_niagara_edit_plan,
-        build_eqs_edit_plan=build_eqs_edit_plan,
-        build_sequencer_edit_plan=build_sequencer_edit_plan,
-        build_metasound_edit_plan=build_metasound_edit_plan,
-        build_pcg_edit_plan=build_pcg_edit_plan,
-        build_motion_matching_edit_plan=build_motion_matching_edit_plan,
-        build_ik_rig_edit_plan=build_ik_rig_edit_plan,
-        build_blueprint_function_edit_plan=build_blueprint_function_edit_plan,
-        build_blueprint_variable_edit_plan=build_blueprint_variable_edit_plan,
-    )
-
-
-@app.post("/plugin/asset-edit-plan")
-def plugin_asset_edit_plan(request: PluginSelectionRequest):
-    selection = (request.selection_name or request.asset_path or request.class_name or "").strip()
-    change_request = (request.change_request or "").strip()
-    return run_asset_action(
-        "asset_edit_plan",
-        analysis=PROJECT_CACHE["analysis"],
-        selection=selection,
-        change_request=change_request,
-        looks_like_rename_request=looks_like_rename_request,
-        looks_like_function_request=looks_like_function_request,
-        build_asset_rename_edit_plan=build_asset_rename_edit_plan,
-        build_data_asset_edit_plan=build_data_asset_edit_plan,
-        build_enhanced_input_edit_plan=build_enhanced_input_edit_plan,
-        build_behavior_tree_edit_plan=build_behavior_tree_edit_plan,
-        build_material_edit_plan=build_material_edit_plan,
-        build_animbp_edit_plan=build_animbp_edit_plan,
-        build_state_tree_edit_plan=build_state_tree_edit_plan,
-        build_control_rig_edit_plan=build_control_rig_edit_plan,
-        build_niagara_edit_plan=build_niagara_edit_plan,
-        build_eqs_edit_plan=build_eqs_edit_plan,
-        build_sequencer_edit_plan=build_sequencer_edit_plan,
-        build_metasound_edit_plan=build_metasound_edit_plan,
-        build_pcg_edit_plan=build_pcg_edit_plan,
-        build_motion_matching_edit_plan=build_motion_matching_edit_plan,
-        build_ik_rig_edit_plan=build_ik_rig_edit_plan,
-        build_blueprint_function_edit_plan=build_blueprint_function_edit_plan,
-        build_blueprint_variable_edit_plan=build_blueprint_variable_edit_plan,
-    )
-
-
-@app.post("/plugin/selection-context")
-def plugin_selection_context(request: PluginSelectionRequest):
-    analysis = PROJECT_CACHE["analysis"]
-    if not analysis:
-        return {"error": "No project has been scanned yet."}
-
-    selection_name = (request.selection_name or "").strip()
-    selection_type = (request.selection_type or "unknown").strip()
-    asset_path = (request.asset_path or "").strip()
-    class_name = (request.class_name or "").strip()
-
-    lookup_terms = [term for term in [selection_name, class_name, asset_path] if term]
-    if not lookup_terms:
-        return {"error": "The plugin did not send enough selection information."}
-
-    primary_term = selection_name or class_name or asset_path
-    base_result = selection_analysis(SelectionRequest(selection=primary_term))
-    specialized_summary = run_asset_action(
-        "plugin_specialized_family",
-        analysis=analysis,
-        selection_name=selection_name,
-        class_name=class_name,
-        asset_path=asset_path,
-    )
-
-    matched_files = search_files(
-        analysis["files"],
-        " ".join(lookup_terms),
-        max_results=6,
-        index_data=PROJECT_CACHE["search_index"]
-    )
-
-    return {
-        "selection_name": selection_name,
-        "selection_type": selection_type,
-        "asset_path": asset_path,
-        "class_name": class_name,
-        "source": request.source or "plugin",
-        "selection_analysis": base_result,
-        "matched_files": matched_files,
-        "specialized_family": specialized_summary,
-    }
-
-
-@app.post("/asset-deep-analysis")
-def asset_deep_analysis(request: DeepAssetAnalysisRequest):
-    return run_asset_action(
-        "asset_deep_analysis",
-        analysis=PROJECT_CACHE["analysis"],
-        asset_kind=request.asset_kind,
-        exported_text=request.exported_text or "",
-        selection_name=request.selection_name or "",
-        class_name=request.class_name or "",
-        asset_path=request.asset_path or "",
-        source=request.source or "web",
-        include_ai_summary=bool(os.getenv("OPENAI_API_KEY")),
-        summarize_with_llm=summarize_deep_asset_with_llm,
-    )
 
 
 @app.post("/explain-blueprint-nodes")
@@ -1124,6 +864,55 @@ Recommended starter graph shape:
         "files": [
             {
                 "label": "Material Outline",
+                "language": "text",
+                "content": outline,
+            }
+        ],
+    }
+
+
+def build_material_instance_scaffold(name, purpose="", class_name=""):
+    clean_name = sanitize_asset_name(name, "MI_")
+    parent_material = (class_name or "").strip() or "Choose an existing base material in Unreal"
+    description = purpose or "Variant material instance for actor- or context-specific tuning"
+
+    outline = f"""Asset: {clean_name}
+Type: Material Instance
+Purpose: {description}
+Suggested Parent Material: {parent_material}
+
+Recommended starter overrides:
+- BaseColorTint
+- Roughness
+- Metallic
+- EmissiveStrength (only if the base material exposes it)
+
+Recommended usage:
+- Keep the parent material stable and reusable
+- Put actor- or context-specific visual tuning in the material instance
+- Prefer a Material Instance over duplicating the whole base material
+"""
+
+    steps = [
+        f"Create a Material Instance asset named `{clean_name}` under `Content/Materials/Instances`.",
+        "Assign a stable parent material before tuning any overrides.",
+        "Only override the parameters that differ from the shared base material.",
+        "If runtime code writes the same parameter values dynamically, verify the editor override is still the right source of truth.",
+    ]
+    if class_name:
+        steps.insert(1, f"Use `{class_name}` as the initial parent material if it matches the intended visual family.")
+
+    return {
+        "asset_kind": "material_instance",
+        "title": f"{clean_name} Material Instance Scaffold",
+        "summary": "This scaffold gives you a safe starter plan for a Material Instance that reuses a base material and exposes only the needed visual overrides.",
+        "recommended_asset_name": clean_name,
+        "recommended_asset_path": f"Content/Materials/Instances/{clean_name}",
+        "recommended_parent_class": parent_material,
+        "steps": steps,
+        "files": [
+            {
+                "label": "Material Instance Outline",
                 "language": "text",
                 "content": outline,
             }
@@ -1720,7 +1509,7 @@ def build_material_edit_plan(asset, change_request, details):
         "Compare the change in-editor and in PIE so runtime overrides do not hide the real result.",
     ]
 
-    return {
+    result = {
         "asset_kind": "material_edit",
         "title": f"Edit Plan for {asset_name}",
         "summary": f"This is a controlled edit plan for tweaking Material parameters in `{asset_name}` without guessing at runtime overrides or reuse impact.",
@@ -1735,6 +1524,10 @@ def build_material_edit_plan(asset, change_request, details):
         "risks": risks[:5],
         "validation_steps": validation,
     }
+    editor_action = build_material_parameter_editor_action(asset, change_request, parameter_name, parameter_type)
+    if editor_action:
+        result["editor_action"] = editor_action
+    return result
 
 
 def build_animbp_edit_plan(asset, change_request, details):
@@ -1796,6 +1589,27 @@ def build_animbp_edit_plan(asset, change_request, details):
         "fields_to_check": fields_to_check,
         "risks": risks[:5],
         "validation_steps": validation,
+    }
+
+
+def build_material_parameter_editor_action(asset, change_request, parameter_name, parameter_type):
+    if asset.get("asset_type") != "material_instance":
+        return None
+
+    inferred_value = infer_material_parameter_value(change_request, parameter_type)
+    if inferred_value is None:
+        return None
+
+    return {
+        "action_type": "tweak_material_parameter",
+        "dry_run": False,
+        "requires_user_confirmation": True,
+        "arguments": {
+            "asset_path": asset.get("path", ""),
+            "parameter_name": parameter_name,
+            "parameter_type": parameter_type.lower(),
+            "parameter_value": inferred_value,
+        },
     }
 
 
@@ -2355,6 +2169,49 @@ def infer_material_parameter_type(change_request):
     return "Scalar"
 
 
+def infer_material_parameter_value(change_request, parameter_type):
+    text = (change_request or "").strip()
+    lowered = text.lower()
+    normalized_type = (parameter_type or "").strip().lower()
+
+    if normalized_type == "texture":
+        quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', text)
+        extracted = []
+        for pair in quoted:
+            extracted.extend([item for item in pair if item])
+        return extracted[-1] if extracted else None
+
+    if normalized_type == "vector":
+        named_colors = {
+            "red": "1,0,0,1",
+            "green": "0,1,0,1",
+            "blue": "0,0,1,1",
+            "white": "1,1,1,1",
+            "black": "0,0,0,1",
+            "yellow": "1,1,0,1",
+            "orange": "1,0.5,0,1",
+        }
+        for color_name, value in named_colors.items():
+            if color_name in lowered:
+                return value
+        number_matches = re.findall(r"-?\d+(?:\.\d+)?", text)
+        if len(number_matches) >= 3:
+            values = number_matches[:4]
+            if len(values) == 3:
+                values.append("1")
+            return ",".join(values)
+        return None
+
+    bool_match = re.search(r"\b(on|off|true|false|enabled|disabled)\b", lowered)
+    if bool_match:
+        return "1.0" if bool_match.group(1) in {"on", "true", "enabled"} else "0.0"
+
+    number_match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if number_match:
+        return number_match.group(0)
+    return None
+
+
 def infer_behavior_tree_node_kind(change_request):
     lowered = (change_request or "").lower()
     if "service" in lowered:
@@ -2488,6 +2345,53 @@ def infer_ik_rig_focus_name(change_request):
     if "retarget" in lowered:
         return "RetargetProfile"
     return "RequestedIKChain"
+
+
+app.include_router(build_plugin_router({
+    "project_cache": PROJECT_CACHE,
+    "run_asset_action": run_asset_action,
+    "search_files": search_files,
+    "selection_analysis": selection_analysis,
+    "selection_request_class": SelectionRequest,
+    "include_ai_summary": lambda: bool(os.getenv("OPENAI_API_KEY")),
+    "summarize_deep_asset_with_llm": summarize_deep_asset_with_llm,
+    "looks_like_rename_request": looks_like_rename_request,
+    "looks_like_function_request": looks_like_function_request,
+    "build_asset_rename_edit_plan": build_asset_rename_edit_plan,
+    "build_data_asset_edit_plan": build_data_asset_edit_plan,
+    "build_enhanced_input_edit_plan": build_enhanced_input_edit_plan,
+    "build_behavior_tree_edit_plan": build_behavior_tree_edit_plan,
+    "build_material_edit_plan": build_material_edit_plan,
+    "build_animbp_edit_plan": build_animbp_edit_plan,
+    "build_state_tree_edit_plan": build_state_tree_edit_plan,
+    "build_control_rig_edit_plan": build_control_rig_edit_plan,
+    "build_niagara_edit_plan": build_niagara_edit_plan,
+    "build_eqs_edit_plan": build_eqs_edit_plan,
+    "build_sequencer_edit_plan": build_sequencer_edit_plan,
+    "build_metasound_edit_plan": build_metasound_edit_plan,
+    "build_pcg_edit_plan": build_pcg_edit_plan,
+    "build_motion_matching_edit_plan": build_motion_matching_edit_plan,
+    "build_ik_rig_edit_plan": build_ik_rig_edit_plan,
+    "build_blueprint_function_edit_plan": build_blueprint_function_edit_plan,
+    "build_blueprint_variable_edit_plan": build_blueprint_variable_edit_plan,
+    "build_blueprint_class_scaffold": build_blueprint_class_scaffold,
+    "build_data_asset_scaffold": build_data_asset_scaffold,
+    "build_animbp_scaffold": build_animbp_scaffold,
+    "build_material_scaffold": build_material_scaffold,
+    "build_material_instance_scaffold": build_material_instance_scaffold,
+    "build_behavior_tree_scaffold": build_behavior_tree_scaffold,
+    "build_input_action_scaffold": build_input_action_scaffold,
+    "build_input_mapping_context_scaffold": build_input_mapping_context_scaffold,
+    "build_state_tree_scaffold": build_state_tree_scaffold,
+    "build_control_rig_scaffold": build_control_rig_scaffold,
+    "build_niagara_scaffold": build_niagara_scaffold,
+    "build_eqs_scaffold": build_eqs_scaffold,
+    "build_sequencer_scaffold": build_sequencer_scaffold,
+    "build_metasound_scaffold": build_metasound_scaffold,
+    "build_pcg_scaffold": build_pcg_scaffold,
+    "build_motion_matching_scaffold": build_motion_matching_scaffold,
+    "build_ik_rig_scaffold": build_ik_rig_scaffold,
+}))
 
 
 def chunk_text(text, chunk_size=7000, overlap=400):

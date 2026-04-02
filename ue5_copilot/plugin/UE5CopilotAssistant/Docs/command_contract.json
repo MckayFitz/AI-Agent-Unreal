@@ -63,7 +63,7 @@
       "direction": "plugin_to_backend",
       "description": "Generate a safe scaffold plan for a new asset without editor mutation.",
       "payload_schema": {
-        "asset_kind": "blueprint_class|animbp|data_asset|material|behavior_tree|input_action|input_mapping_context|state_tree|control_rig|niagara|eqs|sequencer|metasound|pcg|motion_matching|ik_rig",
+        "asset_kind": "blueprint_class|animbp|data_asset|material|material_instance|behavior_tree|input_action|input_mapping_context|state_tree|control_rig|niagara|eqs|sequencer|metasound|pcg|motion_matching|ik_rig",
         "name": "string",
         "purpose": "string",
         "class_name": "string"
@@ -85,13 +85,18 @@
       "direction": "backend_response_to_plugin",
       "description": "Future safe editor-native action returned by the backend and executed only by the plugin after validation and user confirmation.",
       "payload_schema": {
-        "action_type": "rename_asset|create_asset|add_input_action|add_blueprint_variable|add_blueprint_function_stub|tweak_material_parameter|modify_behavior_tree|modify_state_tree|modify_control_rig|modify_niagara_system|modify_eqs_query|modify_level_sequence|modify_metasound|modify_pcg_graph|modify_motion_matching_asset|modify_ik_rig",
+        "action_type": "rename_asset|create_asset|add_input_action|create_material_instance|add_blueprint_variable|add_blueprint_function_stub|tweak_material_parameter|modify_behavior_tree|modify_state_tree|modify_control_rig|modify_niagara_system|modify_eqs_query|modify_level_sequence|modify_metasound|modify_pcg_graph|modify_motion_matching_asset|modify_ik_rig",
         "dry_run": "bool",
         "requires_user_confirmation": "bool",
         "arguments": {
           "asset_path": "string",
           "new_name": "string",
+          "asset_kind": "string",
+          "asset_name": "string",
+          "package_path": "string",
           "target_class": "string",
+          "parent_material": "string",
+          "parameter_value": "string",
           "parameter_name": "string",
           "parameter_type": "string",
           "node_kind": "string",
@@ -109,6 +114,7 @@
     "blueprints",
     "animbps",
     "materials",
+    "material_instances",
     "behavior_trees",
     "enhanced_input",
     "data_assets",

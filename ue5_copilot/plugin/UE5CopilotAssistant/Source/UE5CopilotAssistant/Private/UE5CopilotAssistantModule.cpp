@@ -1,22 +1,40 @@
 #include "UE5CopilotAssistantModule.h"
 
 #include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "IAssetTools.h"
 #include "AssetToolsModule.h"
-#include "AssetRenameData.h"
 #include "ContentBrowserModule.h"
+#include "Components/ActorComponent.h"
 #include "Editor.h"
+#include "EnhancedInput/Public/InputAction.h"
+#include "EnhancedInput/Public/InputMappingContext.h"
+#include "Engine/Blueprint.h"
 #include "Engine/Selection.h"
+#include "Factories/MaterialInstanceConstantFactoryNew.h"
 #include "Framework/Docking/TabManager.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 #include "HttpModule.h"
 #include "IContentBrowserSingleton.h"
 #include "Interfaces/IHttpResponse.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/PackageName.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "MaterialEditingLibrary.h"
+#include "Engine/Texture.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenus.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
 #include "UObject/SoftObjectPath.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
@@ -25,9 +43,12 @@
 #include "Widgets/Input/SComboBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
+#include "WorkspaceMenuStructureModule.h"
 #include "WorkspaceMenuStructure.h"
 
 static const FName UE5CopilotAssistantTabName(TEXT("UE5CopilotAssistant"));
+static const TCHAR* UE5CopilotSettingsSection = TEXT("/Script/UE5CopilotAssistant.UE5CopilotAssistant");
+static const TCHAR* UE5CopilotBackendUrlKey = TEXT("BackendBaseUrl");
 
 #define LOCTEXT_NAMESPACE "FUE5CopilotAssistantModule"
 
@@ -62,6 +83,315 @@ namespace UE5CopilotAssistant
         return Result;
     }
 
+    UClass* ResolveBlueprintParentClass(const FString& ParentClassName)
+    {
+        const FString TrimmedName = ParentClassName.TrimStartAndEnd();
+        if (TrimmedName.IsEmpty())
+        {
+            return nullptr;
+        }
+
+        if (TrimmedName == TEXT("Actor"))
+        {
+            return AActor::StaticClass();
+        }
+        if (TrimmedName == TEXT("Pawn"))
+        {
+            return APawn::StaticClass();
+        }
+        if (TrimmedName == TEXT("Character"))
+        {
+            return ACharacter::StaticClass();
+        }
+        if (TrimmedName == TEXT("PlayerController"))
+        {
+            return APlayerController::StaticClass();
+        }
+        if (TrimmedName == TEXT("ActorComponent"))
+        {
+            return UActorComponent::StaticClass();
+        }
+
+        return FindFirstObject<UClass>(*TrimmedName, EFindFirstObjectOptions::None);
+    }
+
+    bool CreateBlueprintAsset(const FString& PackagePath, const FString& AssetName, const FString& ParentClassName, FString& OutError)
+    {
+        if (!PackagePath.StartsWith(TEXT("/Game")))
+        {
+            OutError = TEXT("Create-asset actions currently require a /Game package path.");
+            return false;
+        }
+
+        if (AssetName.IsEmpty())
+        {
+            OutError = TEXT("Create-asset actions require a non-empty asset name.");
+            return false;
+        }
+
+        UClass* ParentClass = ResolveBlueprintParentClass(ParentClassName);
+        if (!ParentClass)
+        {
+            OutError = FString::Printf(TEXT("The parent class `%s` could not be resolved in the editor."), *ParentClassName);
+            return false;
+        }
+
+        if (!FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass))
+        {
+            OutError = FString::Printf(TEXT("The parent class `%s` does not support regular Blueprint creation."), *ParentClassName);
+            return false;
+        }
+
+        const FString ObjectPath = PackagePath / AssetName;
+        if (FindObject<UObject>(nullptr, *ObjectPath))
+        {
+            OutError = FString::Printf(TEXT("An asset already exists at `%s`."), *ObjectPath);
+            return false;
+        }
+
+        UPackage* Package = CreatePackage(*ObjectPath);
+        if (!Package)
+        {
+            OutError = FString::Printf(TEXT("The package `%s` could not be created."), *ObjectPath);
+            return false;
+        }
+
+        UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+            ParentClass,
+            Package,
+            *AssetName,
+            BPTYPE_Normal,
+            UBlueprint::StaticClass(),
+            UBlueprintGeneratedClass::StaticClass(),
+            FName(TEXT("UE5CopilotAssistant"))
+        );
+        if (!Blueprint)
+        {
+            OutError = FString::Printf(TEXT("Blueprint creation failed for `%s`."), *ObjectPath);
+            return false;
+        }
+
+        FAssetRegistryModule::AssetCreated(Blueprint);
+        Package->MarkPackageDirty();
+        return true;
+    }
+
+    bool CreateEnhancedInputAsset(const FString& PackagePath, const FString& AssetName, const FString& AssetKind, FString& OutError)
+    {
+        if (!PackagePath.StartsWith(TEXT("/Game")))
+        {
+            OutError = TEXT("Create-asset actions currently require a /Game package path.");
+            return false;
+        }
+
+        if (AssetName.IsEmpty())
+        {
+            OutError = TEXT("Create-asset actions require a non-empty asset name.");
+            return false;
+        }
+
+        const FString ObjectPath = PackagePath / AssetName;
+        if (FindObject<UObject>(nullptr, *ObjectPath))
+        {
+            OutError = FString::Printf(TEXT("An asset already exists at `%s`."), *ObjectPath);
+            return false;
+        }
+
+        UPackage* Package = CreatePackage(*ObjectPath);
+        if (!Package)
+        {
+            OutError = FString::Printf(TEXT("The package `%s` could not be created."), *ObjectPath);
+            return false;
+        }
+
+        UObject* CreatedObject = nullptr;
+        if (AssetKind == TEXT("input_action"))
+        {
+            CreatedObject = NewObject<UInputAction>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+        }
+        else if (AssetKind == TEXT("input_mapping_context"))
+        {
+            CreatedObject = NewObject<UInputMappingContext>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+        }
+        else
+        {
+            OutError = FString::Printf(TEXT("Unsupported create-asset kind `%s`."), *AssetKind);
+            return false;
+        }
+
+        if (!CreatedObject)
+        {
+            OutError = FString::Printf(TEXT("Asset creation failed for `%s`."), *ObjectPath);
+            return false;
+        }
+
+        FAssetRegistryModule::AssetCreated(CreatedObject);
+        Package->MarkPackageDirty();
+        return true;
+    }
+
+    bool CreateMaterialInstanceAsset(const FString& PackagePath, const FString& AssetName, const FString& ParentMaterialPathOrName, FString& OutError)
+    {
+        if (!PackagePath.StartsWith(TEXT("/Game")))
+        {
+            OutError = TEXT("Create-asset actions currently require a /Game package path.");
+            return false;
+        }
+
+        if (AssetName.IsEmpty())
+        {
+            OutError = TEXT("Create-asset actions require a non-empty asset name.");
+            return false;
+        }
+
+        const FString ObjectPath = PackagePath / AssetName;
+        if (FindObject<UObject>(nullptr, *ObjectPath))
+        {
+            OutError = FString::Printf(TEXT("An asset already exists at `%s`."), *ObjectPath);
+            return false;
+        }
+
+        UMaterialInterface* ParentMaterial = nullptr;
+        const FString ParentHint = ParentMaterialPathOrName.TrimStartAndEnd();
+        if (!ParentHint.IsEmpty())
+        {
+            if (ParentHint.StartsWith(TEXT("/")))
+            {
+                ParentMaterial = LoadObject<UMaterialInterface>(nullptr, *ParentHint);
+            }
+            if (!ParentMaterial)
+            {
+                ParentMaterial = FindFirstObject<UMaterialInterface>(*ParentHint, EFindFirstObjectOptions::None);
+            }
+        }
+
+        UMaterialInstanceConstantFactoryNew* Factory = NewObject<UMaterialInstanceConstantFactoryNew>();
+        if (!Factory)
+        {
+            OutError = TEXT("The Material Instance factory could not be created.");
+            return false;
+        }
+        Factory->InitialParent = ParentMaterial;
+
+        FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+        UObject* CreatedObject = AssetToolsModule.Get().CreateAsset(
+            AssetName,
+            PackagePath,
+            UMaterialInstanceConstant::StaticClass(),
+            Factory
+        );
+
+        if (!CreatedObject)
+        {
+            OutError = ParentHint.IsEmpty()
+                ? FString::Printf(TEXT("Material Instance creation failed for `%s`."), *ObjectPath)
+                : FString::Printf(TEXT("Material Instance creation failed for `%s`. Check that the parent material `%s` exists and is loadable."), *ObjectPath, *ParentHint);
+            return false;
+        }
+
+        return true;
+    }
+
+    bool ParseVectorParameterValue(const FString& ValueText, FLinearColor& OutColor)
+    {
+        TArray<FString> Parts;
+        ValueText.ParseIntoArray(Parts, TEXT(","), true);
+        if (Parts.Num() < 3)
+        {
+            return false;
+        }
+
+        double Components[4] = {0.0, 0.0, 0.0, 1.0};
+        for (int32 Index = 0; Index < FMath::Min(Parts.Num(), 4); ++Index)
+        {
+            const FString Part = Parts[Index].TrimStartAndEnd();
+            if (!LexTryParseString(Components[Index], *Part))
+            {
+                return false;
+            }
+        }
+
+        OutColor = FLinearColor(
+            static_cast<float>(Components[0]),
+            static_cast<float>(Components[1]),
+            static_cast<float>(Components[2]),
+            static_cast<float>(Components[3])
+        );
+        return true;
+    }
+
+    bool TweakMaterialInstanceParameter(const FString& AssetPath, const FString& ParameterName, const FString& ParameterType, const FString& ParameterValue, FString& OutError)
+    {
+        if (AssetPath.IsEmpty() || ParameterName.IsEmpty() || ParameterType.IsEmpty() || ParameterValue.IsEmpty())
+        {
+            OutError = TEXT("Material parameter edits require `asset_path`, `parameter_name`, `parameter_type`, and `parameter_value`.");
+            return false;
+        }
+
+        UMaterialInstanceConstant* MaterialInstance = LoadObject<UMaterialInstanceConstant>(nullptr, *AssetPath);
+        if (!MaterialInstance)
+        {
+            OutError = FString::Printf(TEXT("The Material Instance `%s` could not be loaded."), *AssetPath);
+            return false;
+        }
+
+        const FName ParameterFName(*ParameterName);
+        const FString NormalizedType = ParameterType.ToLower();
+
+        if (NormalizedType == TEXT("scalar"))
+        {
+            double ParsedScalar = 0.0;
+            if (!LexTryParseString(ParsedScalar, *ParameterValue))
+            {
+                OutError = FString::Printf(TEXT("`%s` is not a valid scalar parameter value."), *ParameterValue);
+                return false;
+            }
+
+            UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MaterialInstance, ParameterFName, static_cast<float>(ParsedScalar));
+            MaterialInstance->MarkPackageDirty();
+            return true;
+        }
+
+        if (NormalizedType == TEXT("vector"))
+        {
+            FLinearColor ParsedColor;
+            if (!ParseVectorParameterValue(ParameterValue, ParsedColor))
+            {
+                OutError = FString::Printf(TEXT("`%s` is not a valid vector parameter value. Expected comma-separated RGB or RGBA floats."), *ParameterValue);
+                return false;
+            }
+
+            UMaterialEditingLibrary::SetMaterialInstanceVectorParameterValue(MaterialInstance, ParameterFName, ParsedColor);
+            MaterialInstance->MarkPackageDirty();
+            return true;
+        }
+
+        if (NormalizedType == TEXT("texture"))
+        {
+            UTexture* Texture = nullptr;
+            if (ParameterValue.StartsWith(TEXT("/")))
+            {
+                Texture = LoadObject<UTexture>(nullptr, *ParameterValue);
+            }
+            if (!Texture)
+            {
+                Texture = FindFirstObject<UTexture>(*ParameterValue, EFindFirstObjectOptions::None);
+            }
+            if (!Texture)
+            {
+                OutError = FString::Printf(TEXT("The texture `%s` could not be resolved in the editor."), *ParameterValue);
+                return false;
+            }
+
+            UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MaterialInstance, ParameterFName, Texture);
+            MaterialInstance->MarkPackageDirty();
+            return true;
+        }
+
+        OutError = FString::Printf(TEXT("Material parameter editing is not implemented yet for `%s` parameters."), *ParameterType);
+        return false;
+    }
+
     FString BuildAskPayload(const FString& Prompt)
     {
         return FString::Printf(TEXT("{\"question\":\"%s\"}"), *EscapeJson(Prompt));
@@ -88,6 +418,257 @@ namespace UE5CopilotAssistant
             *EscapeJson(AssetPath),
             *EscapeJson(ClassName)
         );
+    }
+
+    FString FormatPropertyValue(FProperty* Property, const void* Container)
+    {
+        if (!Property || !Container)
+        {
+            return TEXT("None");
+        }
+
+        FString ExportedValue;
+        Property->ExportTextItem_Direct(ExportedValue, Property->ContainerPtrToValuePtr<void>(Container), nullptr, nullptr, PPF_None);
+        ExportedValue = ExportedValue.Replace(TEXT("\r"), TEXT(" ")).Replace(TEXT("\n"), TEXT(" "));
+        ExportedValue = ExportedValue.TrimStartAndEnd();
+        if (ExportedValue.IsEmpty())
+        {
+            ExportedValue = TEXT("None");
+        }
+        if (ExportedValue.Len() > 180)
+        {
+            ExportedValue = ExportedValue.Left(177) + TEXT("...");
+        }
+        return ExportedValue;
+    }
+
+    FString BuildReflectedAssetSummary(const FAssetData& AssetData)
+    {
+        const FString AssetName = AssetData.AssetName.ToString();
+        const FString AssetClassName = AssetData.AssetClassPath.GetAssetName().ToString();
+        const FString AssetObjectPath = AssetData.GetSoftObjectPath().ToString();
+
+        UObject* AssetObject = AssetData.FastGetAsset();
+        TArray<FString> Lines;
+        Lines.Add(FString::Printf(TEXT("Selected Asset: %s"), *AssetName));
+        Lines.Add(FString::Printf(TEXT("Asset Class: %s"), *AssetClassName));
+        Lines.Add(FString::Printf(TEXT("Asset Path: %s"), *AssetObjectPath));
+
+        if (!AssetObject)
+        {
+            Lines.Add(TEXT("Asset Object: Could not be loaded in the editor; using metadata-only fallback context."));
+            return JoinLines(Lines);
+        }
+
+        Lines.Add(FString::Printf(TEXT("Loaded Class: %s"), *AssetObject->GetClass()->GetName()));
+
+        const FString LoweredAssetClassName = AssetClassName.ToLower();
+        const FString LoweredAssetName = AssetName.ToLower();
+        const bool bBlueprintAsset =
+            LoweredAssetClassName.Contains(TEXT("blueprint")) ||
+            LoweredAssetName.StartsWith(TEXT("bp_")) ||
+            LoweredAssetName.StartsWith(TEXT("wbp_")) ||
+            LoweredAssetName.StartsWith(TEXT("abp_"));
+        const bool bInputActionAsset = LoweredAssetClassName.Contains(TEXT("inputaction")) || LoweredAssetName.StartsWith(TEXT("ia_"));
+        const bool bInputMappingContextAsset = LoweredAssetClassName.Contains(TEXT("inputmappingcontext")) || LoweredAssetName.StartsWith(TEXT("imc_"));
+        const bool bMaterialInstanceAsset = LoweredAssetClassName.Contains(TEXT("materialinstance")) || LoweredAssetName.StartsWith(TEXT("mi_"));
+
+        if (bBlueprintAsset)
+        {
+            Lines.Add(FString::Printf(TEXT("Blueprint Asset: %s"), *AssetName));
+            Lines.Add(FString::Printf(TEXT("Blueprint Class: %s"), *AssetObject->GetClass()->GetName()));
+
+            int32 StructuredFieldCount = 0;
+            for (TFieldIterator<FProperty> It(AssetObject->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
+            {
+                FProperty* Property = *It;
+                if (!Property)
+                {
+                    continue;
+                }
+
+                const FString PropertyName = Property->GetName();
+                const FString LoweredPropertyName = PropertyName.ToLower();
+                if (!(
+                    LoweredPropertyName.Contains(TEXT("state")) ||
+                    LoweredPropertyName.Contains(TEXT("target")) ||
+                    LoweredPropertyName.Contains(TEXT("owner")) ||
+                    LoweredPropertyName.Contains(TEXT("component")) ||
+                    LoweredPropertyName.Contains(TEXT("widget")) ||
+                    LoweredPropertyName.Contains(TEXT("class")) ||
+                    LoweredPropertyName.Contains(TEXT("tag")) ||
+                    LoweredPropertyName.Contains(TEXT("active")) ||
+                    LoweredPropertyName.Contains(TEXT("visible")) ||
+                    LoweredPropertyName.Contains(TEXT("enabled")) ||
+                    LoweredPropertyName.Contains(TEXT("health")) ||
+                    LoweredPropertyName.Contains(TEXT("speed"))
+                ))
+                {
+                    continue;
+                }
+
+                Lines.Add(FString::Printf(TEXT("Blueprint Property: %s = %s"), *PropertyName, *FormatPropertyValue(Property, AssetObject)));
+                ++StructuredFieldCount;
+                if (StructuredFieldCount >= 8)
+                {
+                    break;
+                }
+            }
+        }
+
+        if (bInputActionAsset || bInputMappingContextAsset)
+        {
+            Lines.Add(bInputActionAsset
+                ? FString::Printf(TEXT("Input Action: %s"), *AssetName)
+                : FString::Printf(TEXT("Input Mapping Context: %s"), *AssetName));
+
+            int32 StructuredFieldCount = 0;
+            for (TFieldIterator<FProperty> It(AssetObject->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
+            {
+                FProperty* Property = *It;
+                if (!Property)
+                {
+                    continue;
+                }
+
+                const FString PropertyName = Property->GetName();
+                const FString LoweredPropertyName = PropertyName.ToLower();
+                FString Label;
+                if (LoweredPropertyName.Contains(TEXT("valuetype")))
+                {
+                    Label = TEXT("Value Type");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("trigger")))
+                {
+                    Label = TEXT("Trigger");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("modifier")))
+                {
+                    Label = TEXT("Modifier");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("mapping")))
+                {
+                    Label = TEXT("Mapping");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("action")))
+                {
+                    Label = TEXT("Action");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("key")))
+                {
+                    Label = TEXT("Key");
+                }
+                else
+                {
+                    continue;
+                }
+
+                Lines.Add(FString::Printf(TEXT("%s: %s"), *Label, *FormatPropertyValue(Property, AssetObject)));
+                ++StructuredFieldCount;
+                if (StructuredFieldCount >= 8)
+                {
+                    break;
+                }
+            }
+        }
+
+        if (bMaterialInstanceAsset)
+        {
+            Lines.Add(FString::Printf(TEXT("Material Instance: %s"), *AssetName));
+
+            int32 StructuredFieldCount = 0;
+            for (TFieldIterator<FProperty> It(AssetObject->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
+            {
+                FProperty* Property = *It;
+                if (!Property)
+                {
+                    continue;
+                }
+
+                const FString PropertyName = Property->GetName();
+                const FString LoweredPropertyName = PropertyName.ToLower();
+                FString Label;
+                if (LoweredPropertyName.Contains(TEXT("parent")))
+                {
+                    Label = TEXT("Parent Material");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("scalar")))
+                {
+                    Label = TEXT("Scalar Parameter");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("vector")))
+                {
+                    Label = TEXT("Vector Parameter");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("texture")))
+                {
+                    Label = TEXT("Texture Parameter");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("parameter")))
+                {
+                    Label = TEXT("Parameter");
+                }
+                else if (LoweredPropertyName.Contains(TEXT("material")))
+                {
+                    Label = TEXT("Material Reference");
+                }
+                else
+                {
+                    continue;
+                }
+
+                Lines.Add(FString::Printf(TEXT("%s: %s"), *Label, *FormatPropertyValue(Property, AssetObject)));
+                ++StructuredFieldCount;
+                if (StructuredFieldCount >= 8)
+                {
+                    break;
+                }
+            }
+        }
+
+        int32 ExportedPropertyCount = 0;
+        for (TFieldIterator<FProperty> It(AssetObject->GetClass(), EFieldIterationFlags::IncludeSuper); It; ++It)
+        {
+            FProperty* Property = *It;
+            if (!Property)
+            {
+                continue;
+            }
+
+            const bool bInterestingProperty =
+                Property->HasAnyPropertyFlags(CPF_Edit | CPF_BlueprintVisible) ||
+                Property->IsA(FArrayProperty::StaticClass()) ||
+                Property->IsA(FObjectPropertyBase::StaticClass()) ||
+                Property->GetName().Contains(TEXT("Trigger")) ||
+                Property->GetName().Contains(TEXT("Modifier")) ||
+                Property->GetName().Contains(TEXT("Mapping")) ||
+                Property->GetName().Contains(TEXT("Action"));
+
+            if (!bInterestingProperty)
+            {
+                continue;
+            }
+
+            Lines.Add(FString::Printf(
+                TEXT("Property: %s [%s] = %s"),
+                *Property->GetName(),
+                *Property->GetClass()->GetName(),
+                *FormatPropertyValue(Property, AssetObject)));
+            ++ExportedPropertyCount;
+
+            if (ExportedPropertyCount >= 18)
+            {
+                Lines.Add(TEXT("Property Export: Truncated after 18 interesting properties to keep the payload compact."));
+                break;
+            }
+        }
+
+        if (ExportedPropertyCount == 0)
+        {
+            Lines.Add(TEXT("Property Export: No editor-visible or obviously relevant properties were detected; using metadata-only fallback context."));
+        }
+
+        return JoinLines(Lines);
     }
 
     FString BuildPluginAssetDetailsPayload(const FString& SelectionName, const FString& SelectionType, const FString& AssetPath, const FString& ClassName)
@@ -417,6 +998,20 @@ namespace UE5CopilotAssistant
         Request->ProcessRequest();
     }
 
+    bool GetSelectedAssetData(FAssetData& OutAssetData)
+    {
+        FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+        TArray<FAssetData> SelectedAssets;
+        ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
+        if (SelectedAssets.Num() == 0)
+        {
+            return false;
+        }
+
+        OutAssetData = SelectedAssets[0];
+        return true;
+    }
+
     bool GetCurrentSelection(FString& OutSelectionName, FString& OutSelectionType, FString& OutAssetPath, FString& OutClassName)
     {
         OutSelectionName.Reset();
@@ -439,12 +1034,9 @@ namespace UE5CopilotAssistant
             }
         }
 
-        FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
-        TArray<FAssetData> SelectedAssets;
-        ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
-        if (SelectedAssets.Num() > 0)
+        FAssetData AssetData;
+        if (GetSelectedAssetData(AssetData))
         {
-            const FAssetData& AssetData = SelectedAssets[0];
             OutSelectionName = AssetData.AssetName.ToString();
             OutSelectionType = TEXT("asset");
             OutAssetPath = AssetData.GetSoftObjectPath().ToString();
@@ -458,6 +1050,8 @@ namespace UE5CopilotAssistant
 
 void FUE5CopilotAssistantModule::StartupModule()
 {
+    LoadSettings();
+
     FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
         UE5CopilotAssistantTabName,
         FOnSpawnTab::CreateRaw(this, &FUE5CopilotAssistantModule::SpawnAssistantTab)
@@ -473,9 +1067,34 @@ void FUE5CopilotAssistantModule::StartupModule()
 
 void FUE5CopilotAssistantModule::ShutdownModule()
 {
+    SaveSettings();
     UToolMenus::UnRegisterStartupCallback(this);
     UToolMenus::UnregisterOwner(this);
     FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(UE5CopilotAssistantTabName);
+}
+
+void FUE5CopilotAssistantModule::LoadSettings()
+{
+    FString SavedBackendBaseUrl;
+    if (GConfig && GConfig->GetString(UE5CopilotSettingsSection, UE5CopilotBackendUrlKey, SavedBackendBaseUrl, GEditorPerProjectIni))
+    {
+        const FString NormalizedUrl = UE5CopilotAssistant::NormalizeBaseUrl(SavedBackendBaseUrl);
+        if (!NormalizedUrl.IsEmpty())
+        {
+            CurrentBackendBaseUrl = NormalizedUrl;
+        }
+    }
+}
+
+void FUE5CopilotAssistantModule::SaveSettings() const
+{
+    if (!GConfig)
+    {
+        return;
+    }
+
+    GConfig->SetString(UE5CopilotSettingsSection, UE5CopilotBackendUrlKey, *CurrentBackendBaseUrl, GEditorPerProjectIni);
+    GConfig->Flush(false, GEditorPerProjectIni);
 }
 
 void FUE5CopilotAssistantModule::RegisterMenus()
@@ -504,6 +1123,7 @@ void FUE5CopilotAssistantModule::RegisterMenus()
 void FUE5CopilotAssistantModule::HandleBackendBaseUrlChanged(const FText& NewText)
 {
     CurrentBackendBaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(NewText.ToString());
+    SaveSettings();
 }
 
 void FUE5CopilotAssistantModule::OpenAssistantTab()
@@ -552,7 +1172,7 @@ void FUE5CopilotAssistantModule::AddAssetContextMenuEntries(FMenuBuilder& MenuBu
     MenuBuilder.EndSection();
 }
 
-void FUE5CopilotAssistantModule::RequestAssetDetailsForSelection(const FAssetData& AssetData)
+void FUE5CopilotAssistantModule::RequestAssetDetailsForSelection(FAssetData AssetData)
 {
     OpenAssistantTab();
 
@@ -594,7 +1214,7 @@ void FUE5CopilotAssistantModule::RequestAssetDetailsForSelection(const FAssetDat
     );
 }
 
-void FUE5CopilotAssistantModule::RequestAssetEditPlanForSelection(const FAssetData& AssetData)
+void FUE5CopilotAssistantModule::RequestAssetEditPlanForSelection(FAssetData AssetData)
 {
     OpenAssistantTab();
 
@@ -680,6 +1300,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
             MakeShared<FString>(TEXT("animbp")),
             MakeShared<FString>(TEXT("data_asset")),
             MakeShared<FString>(TEXT("material")),
+            MakeShared<FString>(TEXT("material_instance")),
             MakeShared<FString>(TEXT("behavior_tree")),
             MakeShared<FString>(TEXT("input_action")),
             MakeShared<FString>(TEXT("input_mapping_context")),
@@ -1129,11 +1750,11 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 return FReply::Handled();
                             }
 
-                            if (ActionType != TEXT("rename_asset"))
+                            if (ActionType != TEXT("rename_asset") && ActionType != TEXT("create_asset") && ActionType != TEXT("tweak_material_parameter"))
                             {
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(FText::FromString(FString::Printf(TEXT("`%s` previewed successfully, but only `rename_asset` execution is enabled right now."), *ActionType)));
+                                    StatusTextPtr->SetText(FText::FromString(FString::Printf(TEXT("`%s` previewed successfully, but this plugin only executes `rename_asset`, a small set of safe `create_asset` actions, and narrow material-instance parameter tweaks right now."), *ActionType)));
                                 }
                                 return FReply::Handled();
                             }
@@ -1148,90 +1769,292 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 return FReply::Handled();
                             }
 
-                            FString TargetAssetPath;
-                            FString NewName;
-                            (*ArgumentsObject)->TryGetStringField(TEXT("asset_path"), TargetAssetPath);
-                            (*ArgumentsObject)->TryGetStringField(TEXT("new_name"), NewName);
-
-                            if (TargetAssetPath.IsEmpty() || NewName.IsEmpty())
+                            if (ActionType == TEXT("rename_asset"))
                             {
+                                FString TargetAssetPath;
+                                FString NewName;
+                                (*ArgumentsObject)->TryGetStringField(TEXT("asset_path"), TargetAssetPath);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("new_name"), NewName);
+
+                                if (TargetAssetPath.IsEmpty() || NewName.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotIncompleteRenameArguments", "The rename action needs both `asset_path` and `new_name`."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                FString SelectionName, SelectionType, SelectedAssetPath, SelectedClassName;
+                                if (!UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, SelectedAssetPath, SelectedClassName) || SelectionType != TEXT("asset"))
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameNeedsSelectedAsset", "Select the target asset in the Content Browser before executing a rename."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                if (SelectedAssetPath != TargetAssetPath)
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameSelectionMismatch", "The currently selected asset does not match the previewed rename target."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                const EAppReturnType::Type ConfirmResult = FMessageDialog::Open(
+                                    EAppMsgType::OkCancel,
+                                    FText::FromString(FString::Printf(
+                                        TEXT("Rename the selected asset\n\nFrom: %s\nTo: %s\n\nThis action will use Unreal editor APIs and should only be applied if the preview still looks correct."),
+                                        *TargetAssetPath,
+                                        *NewName))
+                                );
+                                if (ConfirmResult != EAppReturnType::Ok)
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameCancelled", "Rename cancelled."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                const FSoftObjectPath SoftObjectPath(TargetAssetPath);
+                                UObject* AssetObject = SoftObjectPath.TryLoad();
+                                if (!AssetObject)
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameLoadFailed", "The target asset could not be loaded for rename."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                const FString CurrentPackageName = FPackageName::ObjectPathToPackageName(TargetAssetPath);
+                                const FString DestinationPackagePath = FPackageName::GetLongPackagePath(CurrentPackageName);
+                                TArray<FAssetRenameData> RenameData;
+                                RenameData.Emplace(AssetObject, DestinationPackagePath, NewName);
+
+                                FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+                                AssetToolsModule.Get().RenameAssets(RenameData);
+
+                                const bool bRenameSucceeded = AssetObject->GetName() == NewName;
+                                PendingEditorActionJson.Reset();
+                                if (EditorActionPreviewTextBoxPtr.IsValid())
+                                {
+                                    EditorActionPreviewTextBoxPtr->SetText(
+                                        bRenameSucceeded
+                                            ? LOCTEXT("UE5CopilotEditorActionPreviewConsumed", "Rename action executed. No previewed editor action is pending.")
+                                            : LOCTEXT("UE5CopilotEditorActionPreviewRenameUnverified", "Rename was attempted, but the plugin could not verify that the asset name changed.")
+                                    );
+                                }
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotIncompleteRenameArguments", "The rename action needs both `asset_path` and `new_name`."));
+                                    StatusTextPtr->SetText(
+                                        bRenameSucceeded
+                                            ? LOCTEXT("UE5CopilotRenameExecuted", "Rename action executed through Unreal editor APIs.")
+                                            : LOCTEXT("UE5CopilotRenameUnverified", "Rename was attempted, but the result could not be verified. Check the Content Browser before continuing.")
+                                    );
                                 }
                                 return FReply::Handled();
                             }
 
-                            FString SelectionName, SelectionType, SelectedAssetPath, SelectedClassName;
-                            if (!UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, SelectedAssetPath, SelectedClassName) || SelectionType != TEXT("asset"))
+                            if (ActionType == TEXT("tweak_material_parameter"))
                             {
+                                FString TargetAssetPath;
+                                FString ParameterName;
+                                FString ParameterType;
+                                FString ParameterValue;
+                                (*ArgumentsObject)->TryGetStringField(TEXT("asset_path"), TargetAssetPath);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("parameter_name"), ParameterName);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("parameter_type"), ParameterType);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("parameter_value"), ParameterValue);
+
+                                if (TargetAssetPath.IsEmpty() || ParameterName.IsEmpty() || ParameterType.IsEmpty() || ParameterValue.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotIncompleteMaterialEditArguments", "The material-parameter action requires `asset_path`, `parameter_name`, `parameter_type`, and `parameter_value`."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                FString SelectionName, SelectionType, SelectedAssetPath, SelectedClassName;
+                                if (!UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, SelectedAssetPath, SelectedClassName) || SelectionType != TEXT("asset"))
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotMaterialEditNeedsSelectedAsset", "Select the target Material Instance in the Content Browser before executing a parameter edit."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                if (SelectedAssetPath != TargetAssetPath)
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotMaterialEditSelectionMismatch", "The currently selected asset does not match the previewed Material Instance target."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                const EAppReturnType::Type ConfirmMaterialEditResult = FMessageDialog::Open(
+                                    EAppMsgType::OkCancel,
+                                    FText::FromString(FString::Printf(
+                                        TEXT("Edit a Material Instance parameter\n\nAsset: %s\nParameter: %s\nType: %s\nValue: %s\n\nThis action will update the selected Material Instance through Unreal editor APIs."),
+                                        *TargetAssetPath,
+                                        *ParameterName,
+                                        *ParameterType,
+                                        *ParameterValue))
+                                );
+                                if (ConfirmMaterialEditResult != EAppReturnType::Ok)
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotMaterialEditCancelled", "Material parameter edit cancelled."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                FString MaterialEditError;
+                                const bool bMaterialEditSucceeded = UE5CopilotAssistant::TweakMaterialInstanceParameter(
+                                    TargetAssetPath,
+                                    ParameterName,
+                                    ParameterType,
+                                    ParameterValue,
+                                    MaterialEditError
+                                );
+                                PendingEditorActionJson.Reset();
+                                if (EditorActionPreviewTextBoxPtr.IsValid())
+                                {
+                                    EditorActionPreviewTextBoxPtr->SetText(
+                                        bMaterialEditSucceeded
+                                            ? LOCTEXT("UE5CopilotEditorActionPreviewMaterialEditConsumed", "Material parameter action executed. No previewed editor action is pending.")
+                                            : LOCTEXT("UE5CopilotEditorActionPreviewMaterialEditFailed", "Material parameter execution failed. Review the status message for details.")
+                                    );
+                                }
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameNeedsSelectedAsset", "Select the target asset in the Content Browser before executing a rename."));
+                                    StatusTextPtr->SetText(
+                                        bMaterialEditSucceeded
+                                            ? LOCTEXT("UE5CopilotMaterialEditExecuted", "Material Instance parameter updated through Unreal editor APIs.")
+                                            : FText::FromString(MaterialEditError.IsEmpty() ? TEXT("Material parameter execution failed.") : MaterialEditError)
+                                    );
                                 }
                                 return FReply::Handled();
                             }
 
-                            if (SelectedAssetPath != TargetAssetPath)
+                            FString AssetKind;
+                            FString AssetName;
+                            FString PackagePath;
+                            FString ParentClass;
+                            FString ParentMaterial;
+                            (*ArgumentsObject)->TryGetStringField(TEXT("asset_kind"), AssetKind);
+                            (*ArgumentsObject)->TryGetStringField(TEXT("asset_name"), AssetName);
+                            (*ArgumentsObject)->TryGetStringField(TEXT("package_path"), PackagePath);
+                            (*ArgumentsObject)->TryGetStringField(TEXT("parent_class"), ParentClass);
+                            (*ArgumentsObject)->TryGetStringField(TEXT("parent_material"), ParentMaterial);
+
+                            if (AssetName.IsEmpty() || PackagePath.IsEmpty())
                             {
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameSelectionMismatch", "The currently selected asset does not match the previewed rename target."));
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotIncompleteCreateArguments", "The create-asset action currently requires `asset_kind`, `asset_name`, and `package_path`."));
                                 }
                                 return FReply::Handled();
                             }
 
-                            const EAppReturnType::Type ConfirmResult = FMessageDialog::Open(
+                            FString ConfirmationBody;
+                            if (AssetKind == TEXT("blueprint_class"))
+                            {
+                                if (ParentClass.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingCreateParentClass", "Blueprint create-asset actions require a `parent_class`."));
+                                    }
+                                    return FReply::Handled();
+                                }
+                                ConfirmationBody = FString::Printf(
+                                    TEXT("Create a Blueprint asset\n\nName: %s\nPath: %s\nParent Class: %s\n\nThis action will create a new Blueprint asset through Unreal editor APIs."),
+                                    *AssetName,
+                                    *PackagePath,
+                                    *ParentClass);
+                            }
+                            else if (AssetKind == TEXT("input_action"))
+                            {
+                                ConfirmationBody = FString::Printf(
+                                    TEXT("Create an Input Action asset\n\nName: %s\nPath: %s\n\nThis action will create a new Enhanced Input Action asset through Unreal editor APIs."),
+                                    *AssetName,
+                                    *PackagePath);
+                            }
+                            else if (AssetKind == TEXT("input_mapping_context"))
+                            {
+                                ConfirmationBody = FString::Printf(
+                                    TEXT("Create an Input Mapping Context asset\n\nName: %s\nPath: %s\n\nThis action will create a new Enhanced Input Mapping Context asset through Unreal editor APIs."),
+                                    *AssetName,
+                                    *PackagePath);
+                            }
+                            else if (AssetKind == TEXT("material_instance"))
+                            {
+                                ConfirmationBody = FString::Printf(
+                                    TEXT("Create a Material Instance asset\n\nName: %s\nPath: %s\nParent Material: %s\n\nThis action will create a new Material Instance asset through Unreal editor APIs."),
+                                    *AssetName,
+                                    *PackagePath,
+                                    ParentMaterial.IsEmpty() ? TEXT("None specified") : *ParentMaterial);
+                            }
+                            else
+                            {
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(FText::FromString(FString::Printf(TEXT("Create-asset execution is not implemented yet for `%s`."), *AssetKind)));
+                                }
+                                return FReply::Handled();
+                            }
+
+                            const EAppReturnType::Type ConfirmCreateResult = FMessageDialog::Open(
                                 EAppMsgType::OkCancel,
-                                FText::FromString(FString::Printf(
-                                    TEXT("Rename the selected asset\n\nFrom: %s\nTo: %s\n\nThis action will use Unreal editor APIs and should only be applied if the preview still looks correct."),
-                                    *TargetAssetPath,
-                                    *NewName))
+                                FText::FromString(ConfirmationBody)
                             );
-                            if (ConfirmResult != EAppReturnType::Ok)
+                            if (ConfirmCreateResult != EAppReturnType::Ok)
                             {
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameCancelled", "Rename cancelled."));
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotCreateCancelled", "Asset creation cancelled."));
                                 }
                                 return FReply::Handled();
                             }
 
-                            const FSoftObjectPath SoftObjectPath(TargetAssetPath);
-                            UObject* AssetObject = SoftObjectPath.TryLoad();
-                            if (!AssetObject)
+                            FString CreateError;
+                            bool bCreateSucceeded = false;
+                            if (AssetKind == TEXT("blueprint_class"))
                             {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotRenameLoadFailed", "The target asset could not be loaded for rename."));
-                                }
-                                return FReply::Handled();
+                                bCreateSucceeded = UE5CopilotAssistant::CreateBlueprintAsset(PackagePath, AssetName, ParentClass, CreateError);
                             }
-
-                            const FString CurrentPackageName = FPackageName::ObjectPathToPackageName(TargetAssetPath);
-                            const FString DestinationPackagePath = FPackageName::GetLongPackagePath(CurrentPackageName);
-                            TArray<FAssetRenameData> RenameData;
-                            RenameData.Emplace(AssetObject, DestinationPackagePath, NewName);
-
-                            FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-                            AssetToolsModule.Get().RenameAssets(RenameData);
-
-                            const bool bRenameSucceeded = AssetObject->GetName() == NewName;
+                            else if (AssetKind == TEXT("material_instance"))
+                            {
+                                bCreateSucceeded = UE5CopilotAssistant::CreateMaterialInstanceAsset(PackagePath, AssetName, ParentMaterial, CreateError);
+                            }
+                            else
+                            {
+                                bCreateSucceeded = UE5CopilotAssistant::CreateEnhancedInputAsset(PackagePath, AssetName, AssetKind, CreateError);
+                            }
                             PendingEditorActionJson.Reset();
                             if (EditorActionPreviewTextBoxPtr.IsValid())
                             {
                                 EditorActionPreviewTextBoxPtr->SetText(
-                                    bRenameSucceeded
-                                        ? LOCTEXT("UE5CopilotEditorActionPreviewConsumed", "Rename action executed. No previewed editor action is pending.")
-                                        : LOCTEXT("UE5CopilotEditorActionPreviewRenameUnverified", "Rename was attempted, but the plugin could not verify that the asset name changed.")
+                                    bCreateSucceeded
+                                        ? LOCTEXT("UE5CopilotEditorActionPreviewCreateConsumed", "Create-asset action executed. No previewed editor action is pending.")
+                                        : LOCTEXT("UE5CopilotEditorActionPreviewCreateFailed", "Create-asset execution failed. Review the status message for details.")
                                 );
                             }
                             if (StatusTextPtr.IsValid())
                             {
                                 StatusTextPtr->SetText(
-                                    bRenameSucceeded
-                                        ? LOCTEXT("UE5CopilotRenameExecuted", "Rename action executed through Unreal editor APIs.")
-                                        : LOCTEXT("UE5CopilotRenameUnverified", "Rename was attempted, but the result could not be verified. Check the Content Browser before continuing.")
+                                    bCreateSucceeded
+                                        ? LOCTEXT("UE5CopilotCreateExecuted", "Asset created through Unreal editor APIs.")
+                                        : FText::FromString(CreateError.IsEmpty() ? TEXT("Create-asset execution failed.") : CreateError)
                                 );
                             }
                             return FReply::Handled();
@@ -1313,7 +2136,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     .OnClicked_Lambda([this, DeepAssetTextBox]()
                     {
                         const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                        const FString ExportedText = DeepAssetTextBox.IsValid() ? DeepAssetTextBox->GetText().ToString() : FString();
+                        FString ExportedText = DeepAssetTextBox.IsValid() ? DeepAssetTextBox->GetText().ToString() : FString();
                         if (BaseUrl.IsEmpty())
                         {
                             if (StatusTextPtr.IsValid())
@@ -1337,6 +2160,19 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                         if (SelectionPreviewTextPtr.IsValid())
                         {
                             SelectionPreviewTextPtr->SetText(FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType)));
+                        }
+
+                        if (ExportedText.TrimStartAndEnd().IsEmpty() && SelectionType == TEXT("asset"))
+                        {
+                            FAssetData SelectedAssetData;
+                            if (UE5CopilotAssistant::GetSelectedAssetData(SelectedAssetData))
+                            {
+                                ExportedText = UE5CopilotAssistant::BuildReflectedAssetSummary(SelectedAssetData);
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusUsingFallbackDeepContext", "No pasted export text was provided, so the plugin is sending reflected property data from the selected asset."));
+                                }
+                            }
                         }
 
                         if (StatusTextPtr.IsValid())
