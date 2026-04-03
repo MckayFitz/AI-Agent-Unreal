@@ -11,9 +11,18 @@ public:
     virtual void ShutdownModule() override;
 
 private:
+    bool StartBackendProcess(FString& OutError);
+    void EnsureBackendAndSendRequest(
+        const FString& Url,
+        const FString& Payload,
+        const TSharedPtr<class SMultiLineEditableTextBox>& OutputTextBox,
+        const TSharedPtr<class SMultiLineEditableTextBox>& EditorActionPreviewTextBox,
+        FString* PendingEditorActionJson,
+        const TSharedPtr<class STextBlock>& StatusText);
     void LoadSettings();
     void SaveSettings() const;
     void HandleBackendBaseUrlChanged(const FText& NewText);
+    void HandleBackendLaunchCommandChanged(const FText& NewText);
     void RegisterMenus();
     TSharedRef<class FExtender> OnExtendContentBrowserAssetSelectionMenu(const TArray<FAssetData>& SelectedAssets);
     void AddAssetContextMenuEntries(class FMenuBuilder& MenuBuilder, TArray<FAssetData> SelectedAssets);
@@ -23,7 +32,9 @@ private:
     TSharedRef<class SDockTab> SpawnAssistantTab(const class FSpawnTabArgs& SpawnTabArgs);
 
     FString CurrentBackendBaseUrl = TEXT("http://127.0.0.1:8000");
+    FString BackendLaunchCommand;
     TSharedPtr<class SEditableTextBox> BackendBaseUrlTextBoxPtr;
+    TSharedPtr<class SEditableTextBox> BackendLaunchCommandTextBoxPtr;
     TSharedPtr<class SEditableTextBox> ScaffoldNameTextBoxPtr;
     TSharedPtr<class SEditableTextBox> ScaffoldPurposeTextBoxPtr;
     TSharedPtr<class SEditableTextBox> ScaffoldClassNameTextBoxPtr;
@@ -37,4 +48,5 @@ private:
     TArray<TSharedPtr<FString>> AssetScaffoldKinds;
     TSharedPtr<FString> SelectedAssetScaffoldKind;
     FString PendingEditorActionJson;
+    bool bBackendStartupInProgress = false;
 };

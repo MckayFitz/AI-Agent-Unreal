@@ -1,3 +1,6 @@
+import json
+import os
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -24,6 +27,16 @@ class PluginSelectionRequest(BaseModel):
     asset_path: str | None = None
     class_name: str | None = None
     change_request: str | None = None
+    source: str | None = None
+
+
+class PluginChatRequest(BaseModel):
+    message: str
+    selection_name: str | None = None
+    selection_type: str | None = None
+    asset_path: str | None = None
+    class_name: str | None = None
+    exported_text: str | None = None
     source: str | None = None
 
 
@@ -224,6 +237,191 @@ def build_plugin_router(deps):
             build_blueprint_variable_edit_plan=deps["build_blueprint_variable_edit_plan"],
         )
 
+    def infer_asset_kind_from_text(text: str) -> str:
+        lowered = text.strip().lower()
+        for alias, resolved in sorted(SCAFFOLD_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
+            if alias in lowered:
+                return resolved
+        return ""
+
+    def fallback_chat_intent(message: str, selection_name: str, asset_path: str, class_name: str, exported_text: str):
+        lowered = message.strip().lower()
+        has_selection = bool(selection_name or asset_path or class_name)
+
+        if exported_text.strip():
+            return {
+                "intent": "asset_deep_analysis",
+                "asset_kind": infer_asset_kind_from_text(message),
+                "asset_name": "",
+                "purpose": "",
+                "class_name": class_name,
+                "change_request": message,
+            }
+
+        if any(token in lowered for token in ["create ", "new ", "scaffold", "generate "]):
+            return {
+                "intent": "asset_scaffold",
+                "asset_kind": infer_asset_kind_from_text(message),
+                "asset_name": "",
+                "purpose": message,
+                "class_name": class_name,
+                "change_request": "",
+            }
+
+        if has_selection and any(token in lowered for token in ["rename", "change", "modify", "update", "fix", "set", "add ", "remove ", "replace", "tweak"]):
+            return {
+                "intent": "asset_edit_plan",
+                "asset_kind": "",
+                "asset_name": "",
+                "purpose": "",
+                "class_name": class_name,
+                "change_request": message,
+            }
+
+        if has_selection:
+            return {
+                "intent": "plugin_asset_details",
+                "asset_kind": "",
+                "asset_name": "",
+                "purpose": "",
+                "class_name": class_name,
+                "change_request": "",
+            }
+
+        return {
+            "intent": "ask",
+            "asset_kind": "",
+            "asset_name": "",
+            "purpose": "",
+            "class_name": class_name,
+            "change_request": "",
+        }
+
+    def classify_chat_request(message: str, selection_name: str, asset_type: str, asset_path: str, class_name: str, exported_text: str, matched_files):
+        if not os.getenv("OPENAI_API_KEY") or "client" not in deps:
+            return fallback_chat_intent(message, selection_name, asset_path, class_name, exported_text)
+
+        selection_summary = "\n".join(
+            line for line in [
+                f"Selection Name: {selection_name or 'None'}",
+                f"Selection Type: {asset_type or 'None'}",
+                f"Asset Path: {asset_path or 'None'}",
+                f"Class Name: {class_name or 'None'}",
+                f"Has Exported Text: {'yes' if exported_text.strip() else 'no'}",
+            ] if line
+        )
+        file_context = "\n".join(f"- {match['path']}" for match in matched_files[:6]) or "- None"
+
+        planner_prompt = f"""
+You are classifying a UE5 plugin chat request into one backend action.
+
+Return JSON only with these keys:
+- intent: one of ask, plugin_asset_details, asset_edit_plan, asset_scaffold, asset_deep_analysis
+- asset_kind: empty string when unknown
+- asset_name: empty string when unknown
+- purpose: empty string when unknown
+- class_name: empty string when unknown
+- change_request: empty string when not relevant
+
+Rules:
+- Use ask for general UE5/project questions.
+- Use plugin_asset_details when the user wants explanation or inspection of the current selection.
+- Use asset_edit_plan when the user wants to change, rename, add to, or fix the selected asset.
+- Use asset_scaffold when the user wants a new asset planned or created.
+- Use asset_deep_analysis when exported graph/state text is provided or the user explicitly asks for deep analysis.
+- Prefer asset_edit_plan over plugin_asset_details when the user asks for a change.
+- Preserve concrete asset names and class hints when they appear.
+
+User message:
+{message}
+
+Current selection:
+{selection_summary}
+
+Relevant project files:
+{file_context}
+"""
+
+        try:
+            response = deps["client"].chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": "You classify Unreal Engine editor assistant requests into a single best backend action."},
+                    {"role": "user", "content": planner_prompt},
+                ],
+            )
+            content = (response.choices[0].message.content or "").strip()
+            payload = json.loads(content)
+            if isinstance(payload, dict) and payload.get("intent"):
+                return {
+                    "intent": str(payload.get("intent", "ask")).strip(),
+                    "asset_kind": str(payload.get("asset_kind", "")).strip(),
+                    "asset_name": str(payload.get("asset_name", "")).strip(),
+                    "purpose": str(payload.get("purpose", "")).strip(),
+                    "class_name": str(payload.get("class_name", "")).strip() or class_name,
+                    "change_request": str(payload.get("change_request", "")).strip(),
+                }
+        except Exception:
+            pass
+
+        return fallback_chat_intent(message, selection_name, asset_path, class_name, exported_text)
+
+    def build_chat_answer(message: str, selection_name: str, asset_type: str, asset_path: str, class_name: str, matched_files):
+        files = deps["project_cache"]["files"]
+        if not files:
+            return {"answer": "No project has been scanned yet.", "matches": []}
+
+        if not os.getenv("OPENAI_API_KEY") or "client" not in deps:
+            return {
+                "answer": "OPENAI_API_KEY is not configured yet.",
+                "matches": matched_files,
+            }
+
+        context_text = "\n\n".join(
+            f"FILE: {match['path']}\nSNIPPET:\n{match['snippet']}"
+            for match in matched_files
+        ) or "No directly matching file snippets were found."
+
+        selection_context = "\n".join([
+            f"Selection Name: {selection_name or 'None'}",
+            f"Selection Type: {asset_type or 'None'}",
+            f"Asset Path: {asset_path or 'None'}",
+            f"Class Name: {class_name or 'None'}",
+        ])
+
+        user_prompt = f"""
+User question or task:
+{message}
+
+Current Unreal selection:
+{selection_context}
+
+Recent context:
+{deps["format_recent_history"]()}
+
+Relevant project context:
+{context_text}
+"""
+
+        response = deps["client"].chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": deps["system_prompt"]()},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+
+        answer = response.choices[0].message.content
+        deps["remember_interaction"](message, answer)
+        return {
+            "answer": answer,
+            "matches": matched_files,
+            "selection_name": selection_name,
+            "selection_type": asset_type,
+            "asset_path": asset_path,
+            "class_name": class_name,
+        }
+
     @router.post("/asset-details")
     def asset_details(request: AssetDetailRequest):
         return deps["run_asset_action"](
@@ -302,6 +500,110 @@ def build_plugin_router(deps):
             "matched_files": matched_files,
             "specialized_family": specialized_summary,
         }
+
+    @router.post("/plugin/chat")
+    def plugin_chat(request: PluginChatRequest):
+        analysis = deps["project_cache"]["analysis"]
+        if not analysis:
+            return {"answer": "No project has been scanned yet."}
+
+        message = (request.message or "").strip()
+        if not message:
+            return {"answer": "Ask a question or describe what you want to do in Unreal."}
+
+        selection_name = (request.selection_name or "").strip()
+        selection_type = (request.selection_type or "").strip()
+        asset_path = (request.asset_path or "").strip()
+        class_name = (request.class_name or "").strip()
+        exported_text = request.exported_text or ""
+
+        search_query = " ".join(part for part in [message, selection_name, class_name, asset_path] if part)
+        matched_files = deps["search_files"](
+            analysis["files"],
+            search_query,
+            max_results=6,
+            index_data=deps["project_cache"]["search_index"],
+        )
+
+        plan = classify_chat_request(
+            message,
+            selection_name,
+            selection_type,
+            asset_path,
+            class_name,
+            exported_text,
+            matched_files,
+        )
+
+        intent = plan.get("intent", "ask")
+        if intent == "plugin_asset_details":
+            if not (selection_name or asset_path or class_name):
+                return {
+                    "answer": "Select an actor or asset first, or ask a general project question.",
+                    "matches": matched_files,
+                }
+            return deps["run_asset_action"](
+                "plugin_asset_details",
+                analysis=analysis,
+                selection_name=selection_name,
+                asset_path=asset_path,
+                class_name=class_name,
+                source=request.source or "plugin_chat",
+            )
+
+        if intent == "asset_edit_plan":
+            selection = (selection_name or asset_path or class_name).strip()
+            if not selection:
+                return {
+                    "answer": "I think you want to change an asset, but I need you to select that actor or asset first.",
+                    "matches": matched_files,
+                }
+            return build_asset_edit_plan_response(selection=selection, change_request=plan.get("change_request") or message)
+
+        if intent == "asset_scaffold":
+            asset_kind = plan.get("asset_kind", "").strip()
+            asset_name = plan.get("asset_name", "").strip()
+            if not asset_kind:
+                return {
+                    "answer": "I think you want to create a new asset, but I could not infer the asset type yet. Try saying something like `Create a Behavior Tree named BT_EnemyCombat`.",
+                    "matches": matched_files,
+                }
+            if not asset_name:
+                return {
+                    "answer": f"I think you want to create a new `{asset_kind}` asset, but I still need a concrete asset name.",
+                    "matches": matched_files,
+                }
+            return build_asset_scaffold_response(
+                AssetScaffoldRequest(
+                    asset_kind=asset_kind,
+                    name=asset_name,
+                    purpose=plan.get("purpose") or message,
+                    class_name=plan.get("class_name") or class_name,
+                )
+            )
+
+        if intent == "asset_deep_analysis":
+            if not (selection_name or asset_path or class_name):
+                return {
+                    "answer": "Select an actor or asset first before running deep analysis.",
+                    "matches": matched_files,
+                }
+            return deps["run_asset_action"](
+                "asset_deep_analysis",
+                analysis=analysis,
+                asset_kind=plan.get("asset_kind", ""),
+                exported_text=exported_text,
+                selection_name=selection_name,
+                class_name=class_name,
+                asset_path=asset_path,
+                source=request.source or "plugin_chat",
+                include_ai_summary=deps["include_ai_summary"](),
+                summarize_with_llm=deps["summarize_deep_asset_with_llm"],
+            )
+
+        answer = build_chat_answer(message, selection_name, selection_type, asset_path, class_name, matched_files)
+        answer["intent"] = intent
+        return answer
 
     @router.post("/asset-deep-analysis")
     def asset_deep_analysis(request: DeepAssetAnalysisRequest):

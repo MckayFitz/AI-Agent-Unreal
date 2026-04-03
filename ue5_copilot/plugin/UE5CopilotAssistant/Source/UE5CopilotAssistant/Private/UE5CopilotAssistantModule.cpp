@@ -18,13 +18,17 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/PlatformProcess.h"
+#include "Http.h"
 #include "HttpModule.h"
 #include "IContentBrowserSingleton.h"
+#include "Interfaces/IPluginManager.h"
 #include "Interfaces/IHttpResponse.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/PackageName.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "MaterialEditingLibrary.h"
@@ -33,6 +37,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenus.h"
+#include "Containers/Ticker.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
 #include "UObject/SoftObjectPath.h"
@@ -49,6 +54,7 @@
 static const FName UE5CopilotAssistantTabName(TEXT("UE5CopilotAssistant"));
 static const TCHAR* UE5CopilotSettingsSection = TEXT("/Script/UE5CopilotAssistant.UE5CopilotAssistant");
 static const TCHAR* UE5CopilotBackendUrlKey = TEXT("BackendBaseUrl");
+static const TCHAR* UE5CopilotBackendLaunchCommandKey = TEXT("BackendLaunchCommand");
 
 #define LOCTEXT_NAMESPACE "FUE5CopilotAssistantModule"
 
@@ -81,6 +87,29 @@ namespace UE5CopilotAssistant
             Result.LeftChopInline(1);
         }
         return Result;
+    }
+
+    FString BuildSuggestedBackendLaunchCommand()
+    {
+        const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UE5CopilotAssistant"));
+        if (!Plugin.IsValid())
+        {
+            return FString();
+        }
+
+        const FString RepoRoot = FPaths::ConvertRelativePathToFull(FPaths::Combine(Plugin->GetBaseDir(), TEXT(".."), TEXT("..")));
+        const FString PythonPath = FPaths::Combine(RepoRoot, TEXT("venv"), TEXT("Scripts"), TEXT("python.exe"));
+        const FString MainPath = FPaths::Combine(RepoRoot, TEXT("app"), TEXT("main.py"));
+        if (!FPaths::FileExists(PythonPath) || !FPaths::FileExists(MainPath))
+        {
+            return FString();
+        }
+
+        return FString::Printf(
+            TEXT("\"%s\" -m uvicorn app.main:app --app-dir \"%s\" --host 127.0.0.1 --port 8000 --reload"),
+            *PythonPath,
+            *RepoRoot
+        );
     }
 
     UClass* ResolveBlueprintParentClass(const FString& ParentClassName)
@@ -395,6 +424,25 @@ namespace UE5CopilotAssistant
     FString BuildAskPayload(const FString& Prompt)
     {
         return FString::Printf(TEXT("{\"question\":\"%s\"}"), *EscapeJson(Prompt));
+    }
+
+    FString BuildPluginChatPayload(
+        const FString& Message,
+        const FString& SelectionName,
+        const FString& SelectionType,
+        const FString& AssetPath,
+        const FString& ClassName,
+        const FString& ExportedText)
+    {
+        return FString::Printf(
+            TEXT("{\"message\":\"%s\",\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"exported_text\":\"%s\",\"source\":\"ue5_plugin\"}"),
+            *EscapeJson(Message),
+            *EscapeJson(SelectionName),
+            *EscapeJson(SelectionType),
+            *EscapeJson(AssetPath),
+            *EscapeJson(ClassName),
+            *EscapeJson(ExportedText)
+        );
     }
 
     FString BuildSelectionPayload(const FString& SelectionName, const FString& SelectionType, const FString& AssetPath, const FString& ClassName)
@@ -1084,6 +1132,16 @@ void FUE5CopilotAssistantModule::LoadSettings()
             CurrentBackendBaseUrl = NormalizedUrl;
         }
     }
+
+    FString SavedBackendLaunchCommand;
+    if (GConfig && GConfig->GetString(UE5CopilotSettingsSection, UE5CopilotBackendLaunchCommandKey, SavedBackendLaunchCommand, GEditorPerProjectIni))
+    {
+        BackendLaunchCommand = SavedBackendLaunchCommand.TrimStartAndEnd();
+    }
+    if (BackendLaunchCommand.IsEmpty())
+    {
+        BackendLaunchCommand = UE5CopilotAssistant::BuildSuggestedBackendLaunchCommand();
+    }
 }
 
 void FUE5CopilotAssistantModule::SaveSettings() const
@@ -1094,6 +1152,7 @@ void FUE5CopilotAssistantModule::SaveSettings() const
     }
 
     GConfig->SetString(UE5CopilotSettingsSection, UE5CopilotBackendUrlKey, *CurrentBackendBaseUrl, GEditorPerProjectIni);
+    GConfig->SetString(UE5CopilotSettingsSection, UE5CopilotBackendLaunchCommandKey, *BackendLaunchCommand, GEditorPerProjectIni);
     GConfig->Flush(false, GEditorPerProjectIni);
 }
 
@@ -1124,6 +1183,120 @@ void FUE5CopilotAssistantModule::HandleBackendBaseUrlChanged(const FText& NewTex
 {
     CurrentBackendBaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(NewText.ToString());
     SaveSettings();
+}
+
+void FUE5CopilotAssistantModule::HandleBackendLaunchCommandChanged(const FText& NewText)
+{
+    BackendLaunchCommand = NewText.ToString().TrimStartAndEnd();
+    SaveSettings();
+}
+
+bool FUE5CopilotAssistantModule::StartBackendProcess(FString& OutError)
+{
+    const FString LaunchCommand = BackendLaunchCommand.TrimStartAndEnd();
+    if (LaunchCommand.IsEmpty())
+    {
+        OutError = TEXT("Enter a backend launch command first. Example: \"C:\\path\\to\\python.exe\" -m uvicorn app.main:app --host 127.0.0.1 --port 8000");
+        return false;
+    }
+
+    const FString ComSpec = FPlatformProcess::GetEnvironmentVariable(TEXT("ComSpec"));
+    if (ComSpec.IsEmpty())
+    {
+        OutError = TEXT("Could not resolve the system command shell for launching the backend.");
+        return false;
+    }
+
+    const FString Params = FString::Printf(TEXT("/C start \"UE5CopilotBackend\" %s"), *LaunchCommand);
+    FProcHandle ProcHandle = FPlatformProcess::CreateProc(*ComSpec, *Params, true, false, false, nullptr, 0, nullptr, nullptr);
+    if (!ProcHandle.IsValid())
+    {
+        OutError = TEXT("Failed to launch the backend process from the configured command.");
+        return false;
+    }
+
+    FPlatformProcess::CloseProc(ProcHandle);
+    return true;
+}
+
+void FUE5CopilotAssistantModule::EnsureBackendAndSendRequest(
+    const FString& Url,
+    const FString& Payload,
+    const TSharedPtr<SMultiLineEditableTextBox>& OutputTextBox,
+    const TSharedPtr<SMultiLineEditableTextBox>& EditorActionPreviewTextBox,
+    FString* PendingEditorActionJson,
+    const TSharedPtr<STextBlock>& StatusText)
+{
+    TSharedRef<IHttpRequest, ESPMode::ThreadSafe> StatusRequest = FHttpModule::Get().CreateRequest();
+    StatusRequest->SetURL(CurrentBackendBaseUrl + TEXT("/status"));
+    StatusRequest->SetVerb(TEXT("GET"));
+    StatusRequest->OnProcessRequestComplete().BindLambda(
+        [this, Url, Payload, OutputTextBox, EditorActionPreviewTextBox, PendingEditorActionJson, StatusText](FHttpRequestPtr, FHttpResponsePtr HttpResponse, bool bSucceeded)
+        {
+            if (bSucceeded && HttpResponse.IsValid() && EHttpResponseCodes::IsOk(HttpResponse->GetResponseCode()))
+            {
+                UE5CopilotAssistant::SendPostRequest(Url, Payload, OutputTextBox, EditorActionPreviewTextBox, PendingEditorActionJson, StatusText);
+                return;
+            }
+
+            if (bBackendStartupInProgress)
+            {
+                if (StatusText.IsValid())
+                {
+                    StatusText->SetText(LOCTEXT("UE5CopilotBackendStillStarting", "Backend is still starting. Please wait a moment and try again."));
+                }
+                return;
+            }
+
+            FString LaunchError;
+            if (!StartBackendProcess(LaunchError))
+            {
+                if (StatusText.IsValid())
+                {
+                    StatusText->SetText(FText::FromString(LaunchError));
+                }
+                return;
+            }
+
+            bBackendStartupInProgress = true;
+            if (StatusText.IsValid())
+            {
+                StatusText->SetText(LOCTEXT("UE5CopilotBackendStarting", "Starting backend automatically..."));
+            }
+
+            TSharedPtr<int32> AttemptsRemaining = MakeShared<int32>(20);
+            FTSTicker::GetCoreTicker().AddTicker(
+                FTickerDelegate::CreateLambda([this, Url, Payload, OutputTextBox, EditorActionPreviewTextBox, PendingEditorActionJson, StatusText, AttemptsRemaining](float)
+                {
+                    TSharedRef<IHttpRequest, ESPMode::ThreadSafe> PollRequest = FHttpModule::Get().CreateRequest();
+                    PollRequest->SetURL(CurrentBackendBaseUrl + TEXT("/status"));
+                    PollRequest->SetVerb(TEXT("GET"));
+                    PollRequest->OnProcessRequestComplete().BindLambda(
+                        [this, Url, Payload, OutputTextBox, EditorActionPreviewTextBox, PendingEditorActionJson, StatusText, AttemptsRemaining](FHttpRequestPtr, FHttpResponsePtr PollResponse, bool bPollSucceeded)
+                        {
+                            if (bPollSucceeded && PollResponse.IsValid() && EHttpResponseCodes::IsOk(PollResponse->GetResponseCode()))
+                            {
+                                bBackendStartupInProgress = false;
+                                UE5CopilotAssistant::SendPostRequest(Url, Payload, OutputTextBox, EditorActionPreviewTextBox, PendingEditorActionJson, StatusText);
+                                return;
+                            }
+
+                            *AttemptsRemaining -= 1;
+                            if (*AttemptsRemaining <= 0)
+                            {
+                                bBackendStartupInProgress = false;
+                                if (StatusText.IsValid())
+                                {
+                                    StatusText->SetText(LOCTEXT("UE5CopilotBackendStartTimeout", "Backend launch was attempted, but it did not become reachable yet. Check the launch command and Python environment."));
+                                }
+                            }
+                        });
+                    PollRequest->ProcessRequest();
+                    return *AttemptsRemaining > 0 && bBackendStartupInProgress;
+                }),
+                0.5f);
+        });
+    StatusRequest->ProcessRequest();
 }
 
 void FUE5CopilotAssistantModule::OpenAssistantTab()
@@ -1199,7 +1372,7 @@ void FUE5CopilotAssistantModule::RequestAssetDetailsForSelection(FAssetData Asse
         StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAssetDetailsContext", "Inspecting the selected asset..."));
     }
 
-    UE5CopilotAssistant::SendPostRequest(
+    EnsureBackendAndSendRequest(
         BaseUrl + TEXT("/plugin/asset-details"),
         UE5CopilotAssistant::BuildPluginAssetDetailsPayload(
             AssetData.AssetName.ToString(),
@@ -1250,7 +1423,7 @@ void FUE5CopilotAssistantModule::RequestAssetEditPlanForSelection(FAssetData Ass
         StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAssetEditContext", "Building an edit plan for the selected asset..."));
     }
 
-    UE5CopilotAssistant::SendPostRequest(
+    EnsureBackendAndSendRequest(
         BaseUrl + TEXT("/plugin/asset-edit-plan"),
         UE5CopilotAssistant::BuildPluginAssetEditPlanPayload(
             AssetData.AssetName.ToString(),
@@ -1341,8 +1514,36 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                 [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotIntro", "Connect the backend, then choose one path: ask a question, work with the selected asset, or plan a new asset."))
+                    .AutoWrapText(true)
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                [
                     SAssignNew(StatusTextPtr, STextBlock)
-                    .Text(LOCTEXT("UE5CopilotStatusDefault", "Point this tab at the FastAPI backend, ask a question, analyze current selection, or send deep asset text."))
+                    .Text(LOCTEXT("UE5CopilotStatusDefault", "Step 1: confirm the backend URL. Step 2: use the question box or one of the guided asset actions below."))
+                    .AutoWrapText(true)
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 4.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotBackendHeader", "Backend Connection"))
+                    .Font(FAppStyle::GetFontStyle("BoldFont"))
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotBackendHelp", "The plugin sends requests here for explanations, plans, and safe editor actions. If you provide a launch command below, it can start the backend for you."))
+                    .AutoWrapText(true)
                 ]
 
                 + SVerticalBox::Slot()
@@ -1351,7 +1552,44 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 [
                     SAssignNew(BackendBaseUrlTextBoxPtr, SEditableTextBox)
                     .Text(FText::FromString(CurrentBackendBaseUrl))
+                    .HintText(LOCTEXT("UE5CopilotBackendHint", "Backend URL, for example http://127.0.0.1:8000"))
                     .OnTextChanged_Raw(this, &FUE5CopilotAssistantModule::HandleBackendBaseUrlChanged)
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                [
+                    SAssignNew(BackendLaunchCommandTextBoxPtr, SEditableTextBox)
+                    .Text(FText::FromString(BackendLaunchCommand))
+                    .HintText(LOCTEXT("UE5CopilotBackendLaunchHint", "Optional auto-start command, for example \"C:\\path\\to\\python.exe\" -m uvicorn app.main:app --host 127.0.0.1 --port 8000"))
+                    .OnTextChanged_Raw(this, &FUE5CopilotAssistantModule::HandleBackendLaunchCommandChanged)
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                [
+                    SNew(SButton)
+                    .Text(LOCTEXT("UE5CopilotStartBackend", "Start Backend"))
+                    .OnClicked_Lambda([this]()
+                    {
+                        FString LaunchError;
+                        if (!StartBackendProcess(LaunchError))
+                        {
+                            if (StatusTextPtr.IsValid())
+                            {
+                                StatusTextPtr->SetText(FText::FromString(LaunchError));
+                            }
+                            return FReply::Handled();
+                        }
+
+                        if (StatusTextPtr.IsValid())
+                        {
+                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotBackendStartingManual", "Backend launch requested."));
+                        }
+                        return FReply::Handled();
+                    })
                 ]
 
                 + SVerticalBox::Slot()
@@ -1367,7 +1605,25 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .Padding(0.0f, 0.0f, 0.0f, 8.0f)
                 [
                     SAssignNew(PromptTextBoxPtr, SMultiLineEditableTextBox)
-                    .HintText(LOCTEXT("UE5CopilotPromptHint", "Ask about the project or current selection..."))
+                    .HintText(LOCTEXT("UE5CopilotPromptHint", "Ask a question here, or describe the change you want for the selected asset..."))
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 4.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotAskHeader", "Chat With Copilot"))
+                    .Font(FAppStyle::GetFontStyle("BoldFont"))
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotAskHelp", "Type any question or task here. The backend will decide whether to explain something, inspect the current Unreal selection, or build a safe plan."))
+                    .AutoWrapText(true)
                 ]
 
                 + SVerticalBox::Slot()
@@ -1381,7 +1637,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     .Padding(0.0f, 0.0f, 4.0f, 0.0f)
                     [
                         SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotSendAsk", "Ask Backend"))
+                        .Text(LOCTEXT("UE5CopilotSendAsk", "Send"))
                         .OnClicked_Lambda([this]()
                         {
                             const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
@@ -1396,14 +1652,32 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                             }
                             CurrentBackendBaseUrl = BaseUrl;
 
-                            if (StatusTextPtr.IsValid())
+                            FString SelectionName, SelectionType, AssetPath, ClassName;
+                            const bool bHasSelection = UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName);
+                            if (SelectionPreviewTextPtr.IsValid())
                             {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAsk", "Sending question to backend..."));
+                                SelectionPreviewTextPtr->SetText(
+                                    bHasSelection
+                                        ? FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType))
+                                        : LOCTEXT("UE5CopilotSelectionNone", "Current selection: none")
+                                );
                             }
 
-                            UE5CopilotAssistant::SendPostRequest(
-                                BaseUrl + TEXT("/ask"),
-                                UE5CopilotAssistant::BuildAskPayload(Prompt),
+                            if (StatusTextPtr.IsValid())
+                            {
+                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAsk", "Sending chat request to backend..."));
+                            }
+
+                            EnsureBackendAndSendRequest(
+                                BaseUrl + TEXT("/plugin/chat"),
+                                UE5CopilotAssistant::BuildPluginChatPayload(
+                                    Prompt,
+                                    bHasSelection ? SelectionName : FString(),
+                                    bHasSelection ? SelectionType : FString(),
+                                    bHasSelection ? AssetPath : FString(),
+                                    bHasSelection ? ClassName : FString(),
+                                    FString()
+                                ),
                                 OutputTextBoxPtr,
                                 EditorActionPreviewTextBoxPtr,
                                 &PendingEditorActionJson,
@@ -1418,7 +1692,8 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     .Padding(4.0f, 0.0f, 0.0f, 0.0f)
                     [
                         SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotSendSelection", "Analyze Current Selection"))
+                        .Text(LOCTEXT("UE5CopilotSendSelection", "Summarize Selection"))
+                        .ToolTipText(LOCTEXT("UE5CopilotSendSelectionTooltip", "Get a general summary of the currently selected actor or asset."))
                         .OnClicked_Lambda([this]()
                         {
                             const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
@@ -1455,7 +1730,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingSelection", "Sending current editor selection to backend..."));
                             }
 
-                            UE5CopilotAssistant::SendPostRequest(
+                            EnsureBackendAndSendRequest(
                                 BaseUrl + TEXT("/plugin/selection-context"),
                                 UE5CopilotAssistant::BuildSelectionPayload(SelectionName, SelectionType, AssetPath, ClassName),
                                 OutputTextBoxPtr,
@@ -1470,6 +1745,24 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
 
                 + SVerticalBox::Slot()
                 .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 4.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotSelectionWorkflowHeader", "Optional Shortcuts"))
+                    .Font(FAppStyle::GetFontStyle("BoldFont"))
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotSelectionWorkflowHelp", "These buttons are still here when you want to force a specific workflow instead of letting chat decide for you."))
+                    .AutoWrapText(true)
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 8.0f)
                 [
                     SNew(SHorizontalBox)
@@ -1479,7 +1772,8 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     .Padding(0.0f, 0.0f, 4.0f, 0.0f)
                     [
                         SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotExplainAsset", "Explain Selected Asset"))
+                        .Text(LOCTEXT("UE5CopilotExplainAsset", "Inspect Selected Asset"))
+                        .ToolTipText(LOCTEXT("UE5CopilotExplainAssetTooltip", "Inspect the selected asset with asset-specific context."))
                         .OnClicked_Lambda([this]()
                         {
                             const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
@@ -1512,7 +1806,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAssetDetails", "Inspecting the selected asset..."));
                             }
 
-                            UE5CopilotAssistant::SendPostRequest(
+                            EnsureBackendAndSendRequest(
                                 BaseUrl + TEXT("/plugin/asset-details"),
                                 UE5CopilotAssistant::BuildPluginAssetDetailsPayload(SelectionName, SelectionType, AssetPath, ClassName),
                                 OutputTextBoxPtr,
@@ -1529,7 +1823,8 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     .Padding(4.0f, 0.0f, 0.0f, 0.0f)
                     [
                         SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotPlanAssetEdit", "Plan Asset Change"))
+                        .Text(LOCTEXT("UE5CopilotPlanAssetEdit", "Suggest Changes For Selected Asset"))
+                        .ToolTipText(LOCTEXT("UE5CopilotPlanAssetEditTooltip", "Use the text box above as your requested change, then generate a plan for the selected asset."))
                         .OnClicked_Lambda([this]()
                         {
                             const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
@@ -1571,7 +1866,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAssetEdit", "Building an edit plan for the selected asset..."));
                             }
 
-                            UE5CopilotAssistant::SendPostRequest(
+                            EnsureBackendAndSendRequest(
                                 BaseUrl + TEXT("/plugin/asset-edit-plan"),
                                 UE5CopilotAssistant::BuildPluginAssetEditPlanPayload(SelectionName, SelectionType, AssetPath, ClassName, ChangeRequest),
                                 OutputTextBoxPtr,
@@ -1589,8 +1884,17 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .Padding(0.0f, 0.0f, 0.0f, 4.0f)
                 [
                     SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotScaffoldHeader", "Asset Scaffold Planner"))
+                    .Text(LOCTEXT("UE5CopilotScaffoldHeader", "Plan A New Asset"))
                     .Font(FAppStyle::GetFontStyle("BoldFont"))
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotScaffoldHelp", "Use this section when you want a plan for creating a brand-new asset."))
+                    .AutoWrapText(true)
                 ]
 
                 + SVerticalBox::Slot()
@@ -1633,7 +1937,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                 [
                     SAssignNew(ScaffoldPurposeTextBoxPtr, SEditableTextBox)
-                    .HintText(LOCTEXT("UE5CopilotScaffoldPurposeHint", "Optional purpose, for example combat AI flow or impact effect"))
+                    .HintText(LOCTEXT("UE5CopilotScaffoldPurposeHint", "Why this asset exists, for example combat AI flow or impact effect"))
                 ]
 
                 + SVerticalBox::Slot()
@@ -1641,15 +1945,15 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .Padding(0.0f, 0.0f, 0.0f, 8.0f)
                 [
                     SAssignNew(ScaffoldClassNameTextBoxPtr, SEditableTextBox)
-                    .HintText(LOCTEXT("UE5CopilotScaffoldClassHint", "Optional parent/class context, for example Character or UWeaponDataAsset"))
+                    .HintText(LOCTEXT("UE5CopilotScaffoldClassHint", "Optional parent or class context, for example Character or UWeaponDataAsset"))
                 ]
 
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 8.0f)
-                [
-                    SNew(SButton)
-                    .Text(LOCTEXT("UE5CopilotGenerateScaffold", "Generate Asset Scaffold"))
+                    [
+                        SNew(SButton)
+                    .Text(LOCTEXT("UE5CopilotGenerateScaffold", "Create Asset Plan"))
                     .OnClicked_Lambda([this]()
                     {
                         const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
@@ -1679,7 +1983,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                             StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingScaffold", "Generating an asset scaffold plan..."));
                         }
 
-                        UE5CopilotAssistant::SendPostRequest(
+                        EnsureBackendAndSendRequest(
                             BaseUrl + TEXT("/asset-scaffold"),
                             UE5CopilotAssistant::BuildAssetScaffoldPayload(
                                 SelectedAssetScaffoldKind.IsValid() ? *SelectedAssetScaffoldKind : FString(TEXT("blueprint_class")),
@@ -1700,6 +2004,24 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                 [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotAdvancedHeader", "Advanced Tools"))
+                    .Font(FAppStyle::GetFontStyle("BoldFont"))
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotAdvancedHelp", "These controls are more technical. Use them when you want to apply a previewed editor action or send deeper exported asset data."))
+                    .AutoWrapText(true)
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                [
                     SNew(SHorizontalBox)
 
                     + SHorizontalBox::Slot()
@@ -1707,7 +2029,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     .Padding(0.0f, 0.0f, 4.0f, 0.0f)
                     [
                         SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotExecutePreviewedAction", "Execute Previewed Action"))
+                        .Text(LOCTEXT("UE5CopilotExecutePreviewedAction", "Apply Previewed Action"))
                         .OnClicked_Lambda([this]()
                         {
                             if (PendingEditorActionJson.IsEmpty())
@@ -2096,6 +2418,15 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                 [
+                    SNew(STextBlock)
+                    .Text(LOCTEXT("UE5CopilotDeepAnalysisHelp", "Paste exported graph or state text here only when the normal asset tools are not detailed enough."))
+                    .AutoWrapText(true)
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                [
                     SNew(SComboBox<TSharedPtr<FString>>)
                     .OptionsSource(&DeepAssetKinds)
                     .InitiallySelectedItem(SelectedDeepAssetKind)
@@ -2124,7 +2455,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .Padding(0.0f, 0.0f, 0.0f, 8.0f)
                 [
                     SAssignNew(DeepAssetTextBox, SMultiLineEditableTextBox)
-                    .HintText(LOCTEXT("UE5CopilotDeepAssetHint", "Paste exported graph/state text for the selected asset here..."))
+                    .HintText(LOCTEXT("UE5CopilotDeepAssetHint", "Paste exported graph or state text for the selected asset here if you have it..."))
                 ]
 
                 + SVerticalBox::Slot()
@@ -2132,7 +2463,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .Padding(0.0f, 0.0f, 0.0f, 8.0f)
                 [
                     SNew(SButton)
-                    .Text(LOCTEXT("UE5CopilotDeepAnalyze", "Deep Analyze Selected Asset"))
+                    .Text(LOCTEXT("UE5CopilotDeepAnalyze", "Run Deep Analysis"))
                     .OnClicked_Lambda([this, DeepAssetTextBox]()
                     {
                         const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
@@ -2180,7 +2511,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                             StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingDeep", "Sending deep asset analysis request..."));
                         }
 
-                        UE5CopilotAssistant::SendPostRequest(
+                        EnsureBackendAndSendRequest(
                             BaseUrl + TEXT("/asset-deep-analysis"),
                             UE5CopilotAssistant::BuildDeepAssetPayload(
                                 SelectedDeepAssetKind.IsValid() ? *SelectedDeepAssetKind : FString(TEXT("blueprint")),
@@ -2204,7 +2535,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 [
                     SAssignNew(OutputTextBoxPtr, SMultiLineEditableTextBox)
                     .IsReadOnly(true)
-                    .HintText(LOCTEXT("UE5CopilotOutputHint", "Backend responses, scaffold plans, and edit plans will appear here."))
+                    .HintText(LOCTEXT("UE5CopilotOutputHint", "Chat responses, explanations, and plans will appear here."))
                 ]
 
                 + SVerticalBox::Slot()
@@ -2221,7 +2552,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 [
                     SAssignNew(EditorActionPreviewTextBoxPtr, SMultiLineEditableTextBox)
                     .IsReadOnly(true)
-                    .HintText(LOCTEXT("UE5CopilotEditorActionPreviewHint", "Future dry-run editor actions will be previewed here before any execution flow is added."))
+                    .HintText(LOCTEXT("UE5CopilotEditorActionPreviewHint", "Previewed editor actions appear here before you decide whether to apply them."))
                 ]
             ]
         ];
