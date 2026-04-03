@@ -5,7 +5,6 @@ An AI-powered assistant designed to help Unreal Engine 5 developers understand t
 This tool scans a UE5 project, extracts relevant source files, and allows developers to ask questions about their code or paste build errors for instant analysis.
 
 ---
-<img width="1902" height="908" alt="image" src="https://github.com/user-attachments/assets/a3d9460b-0e14-429f-a68a-45095713fb5d" />
 
 
 ## 🚀 Features
