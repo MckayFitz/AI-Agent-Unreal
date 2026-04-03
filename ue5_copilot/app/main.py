@@ -16,6 +16,11 @@ from app.asset_actions import run_asset_action
 from app.code_reader import search_files
 from app.plugin_routes import build_plugin_router
 from app.search_index import build_search_index
+from app.code_patch_planner import build_code_patch_plan
+from app.code_patch_drafter import build_code_patch_draft
+from app.code_patch_bundle_drafter import build_code_patch_bundle_draft
+from app.task_orchestrator import build_agent_task_plan
+from app.agent_runner import start_agent_task_session, confirm_agent_task_session, resume_agent_task_session
 from app.prompts import (
     CRASH_LOG_SYSTEM_PROMPT,
     DEEP_ASSET_ANALYSIS_SYSTEM_PROMPT,
@@ -60,6 +65,7 @@ PROJECT_CACHE = {
     "current_focus": None,
     "search_index": None,
 }
+AGENT_TASK_CACHE: dict[str, dict] = {}
 
 
 class ScanRequest(BaseModel):
@@ -110,6 +116,19 @@ class ReflectionRequest(BaseModel):
 
 class TaskRequest(BaseModel):
     goal: str
+
+
+class AgentTaskRequest(BaseModel):
+    goal: str
+
+
+class AgentConfirmationRequest(BaseModel):
+    decision: str
+
+
+class CodePatchRequest(BaseModel):
+    goal: str
+    target_path: str | None = None
 
 
 class AssetFamilyRequest(BaseModel):
@@ -289,6 +308,186 @@ def task_workflow(request: TaskRequest):
 
     remember_interaction(goal, workflow.get("ai_plan") or workflow["summary"])
     return workflow
+
+
+@app.post("/agent-task")
+def agent_task(request: AgentTaskRequest):
+    goal = request.goal.strip()
+    if not goal:
+        return {"error": "Describe the task first."}
+
+    analysis = PROJECT_CACHE["analysis"]
+    analyzed_files = get_analyzed_files()
+    if not analysis or not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+
+    matched_files = search_files(analyzed_files, goal, max_results=8, index_data=PROJECT_CACHE["search_index"])
+    family_summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
+    plan = build_agent_task_plan(
+        goal=goal,
+        files=analysis["files"],
+        assets=analysis["assets"],
+        matched_files=matched_files,
+        family_summaries=family_summaries,
+    )
+
+    if os.getenv("OPENAI_API_KEY") and plan["candidate_files"]:
+        scoped_files = []
+        for item in plan["candidate_files"][:6]:
+            file_record = find_file_record(item["path"])
+            if file_record:
+                scoped_files.append(file_record)
+        if scoped_files:
+            plan["ai_plan"] = summarize_task_with_llm(goal, scoped_files, plan)
+
+    remember_interaction(goal, plan.get("ai_plan") or plan["summary"])
+    return plan
+
+
+@app.post("/agent-session")
+def agent_session(request: AgentTaskRequest):
+    goal = request.goal.strip()
+    if not goal:
+        return {"error": "Describe the task first."}
+
+    analysis = PROJECT_CACHE["analysis"]
+    analyzed_files = get_analyzed_files()
+    if not analysis or not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+
+    matched_files = search_files(analyzed_files, goal, max_results=8, index_data=PROJECT_CACHE["search_index"])
+    family_summaries = summarize_specialized_assets(analysis["files"], analysis["assets"])
+    session = start_agent_task_session(
+        goal=goal,
+        files=analysis["files"],
+        assets=analysis["assets"],
+        matched_files=matched_files,
+        family_summaries=family_summaries,
+    )
+    AGENT_TASK_CACHE[session["task_id"]] = session
+    remember_interaction(goal, session.get("result", {}).get("summary") or session["steps"][-1]["summary"])
+    return session
+
+
+@app.get("/agent-session/{task_id}")
+def agent_session_status(task_id: str):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+    return session
+
+
+@app.post("/agent-session/{task_id}/status")
+def agent_session_status_post(task_id: str):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+    return session
+
+
+@app.post("/agent-session/{task_id}/confirm")
+def agent_session_confirm(task_id: str, request: AgentConfirmationRequest):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+
+    updated_session = confirm_agent_task_session(session, decision=request.decision)
+    if updated_session.get("error"):
+        return updated_session
+
+    AGENT_TASK_CACHE[task_id] = updated_session
+    remember_interaction(
+        f"agent-session:{task_id}:{request.decision.strip().lower()}",
+        updated_session.get("result", {}).get("summary", updated_session["status"]),
+    )
+    return updated_session
+
+
+@app.post("/agent-session/{task_id}/resume")
+def agent_session_resume(task_id: str):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+
+    updated_session = resume_agent_task_session(session)
+    if updated_session.get("error"):
+        return updated_session
+
+    AGENT_TASK_CACHE[task_id] = updated_session
+    remember_interaction(
+        f"agent-session:{task_id}:resume",
+        updated_session.get("result", {}).get("summary", updated_session["status"]),
+    )
+    return updated_session
+
+
+@app.post("/code-patch-plan")
+def code_patch_plan(request: CodePatchRequest):
+    goal = request.goal.strip()
+    if not goal:
+        return {"error": "Describe the code task first."}
+
+    analysis = PROJECT_CACHE["analysis"]
+    analyzed_files = get_analyzed_files()
+    if not analysis or not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+
+    search_query = " ".join(part for part in [goal, request.target_path or ""] if part)
+    matched_files = search_files(analyzed_files, search_query, max_results=8, index_data=PROJECT_CACHE["search_index"])
+    plan = build_code_patch_plan(
+        goal=goal,
+        files=analysis["files"],
+        matched_files=matched_files,
+        target_path=request.target_path or "",
+    )
+    remember_interaction(goal, plan.get("summary", "Generated a code patch plan."))
+    return plan
+
+
+@app.post("/code-patch-draft")
+def code_patch_draft(request: CodePatchRequest):
+    goal = request.goal.strip()
+    if not goal:
+        return {"error": "Describe the code task first."}
+
+    analysis = PROJECT_CACHE["analysis"]
+    analyzed_files = get_analyzed_files()
+    if not analysis or not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+
+    search_query = " ".join(part for part in [goal, request.target_path or ""] if part)
+    matched_files = search_files(analyzed_files, search_query, max_results=8, index_data=PROJECT_CACHE["search_index"])
+    draft = build_code_patch_draft(
+        goal=goal,
+        files=analysis["files"],
+        matched_files=matched_files,
+        target_path=request.target_path or "",
+    )
+    remember_interaction(goal, draft.get("summary", "Generated a code patch draft."))
+    return draft
+
+
+@app.post("/code-patch-bundle-draft")
+def code_patch_bundle_draft(request: CodePatchRequest):
+    goal = request.goal.strip()
+    if not goal:
+        return {"error": "Describe the code task first."}
+
+    analysis = PROJECT_CACHE["analysis"]
+    analyzed_files = get_analyzed_files()
+    if not analysis or not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+
+    search_query = " ".join(part for part in [goal, request.target_path or ""] if part)
+    matched_files = search_files(analyzed_files, search_query, max_results=8, index_data=PROJECT_CACHE["search_index"])
+    draft = build_code_patch_bundle_draft(
+        goal=goal,
+        files=analysis["files"],
+        matched_files=matched_files,
+        target_path=request.target_path or "",
+    )
+    remember_interaction(goal, draft.get("summary", "Generated a code patch bundle draft."))
+    return draft
 
 
 @app.post("/references")
@@ -2347,57 +2546,6 @@ def infer_ik_rig_focus_name(change_request):
     return "RequestedIKChain"
 
 
-app.include_router(build_plugin_router({
-    "project_cache": PROJECT_CACHE,
-    "run_asset_action": run_asset_action,
-    "search_files": search_files,
-    "selection_analysis": selection_analysis,
-    "selection_request_class": SelectionRequest,
-    "client": client,
-    "system_prompt": lambda: SYSTEM_PROMPT,
-    "format_recent_history": format_recent_history,
-    "remember_interaction": remember_interaction,
-    "include_ai_summary": lambda: bool(os.getenv("OPENAI_API_KEY")),
-    "summarize_deep_asset_with_llm": summarize_deep_asset_with_llm,
-    "looks_like_rename_request": looks_like_rename_request,
-    "looks_like_function_request": looks_like_function_request,
-    "build_asset_rename_edit_plan": build_asset_rename_edit_plan,
-    "build_data_asset_edit_plan": build_data_asset_edit_plan,
-    "build_enhanced_input_edit_plan": build_enhanced_input_edit_plan,
-    "build_behavior_tree_edit_plan": build_behavior_tree_edit_plan,
-    "build_material_edit_plan": build_material_edit_plan,
-    "build_animbp_edit_plan": build_animbp_edit_plan,
-    "build_state_tree_edit_plan": build_state_tree_edit_plan,
-    "build_control_rig_edit_plan": build_control_rig_edit_plan,
-    "build_niagara_edit_plan": build_niagara_edit_plan,
-    "build_eqs_edit_plan": build_eqs_edit_plan,
-    "build_sequencer_edit_plan": build_sequencer_edit_plan,
-    "build_metasound_edit_plan": build_metasound_edit_plan,
-    "build_pcg_edit_plan": build_pcg_edit_plan,
-    "build_motion_matching_edit_plan": build_motion_matching_edit_plan,
-    "build_ik_rig_edit_plan": build_ik_rig_edit_plan,
-    "build_blueprint_function_edit_plan": build_blueprint_function_edit_plan,
-    "build_blueprint_variable_edit_plan": build_blueprint_variable_edit_plan,
-    "build_blueprint_class_scaffold": build_blueprint_class_scaffold,
-    "build_data_asset_scaffold": build_data_asset_scaffold,
-    "build_animbp_scaffold": build_animbp_scaffold,
-    "build_material_scaffold": build_material_scaffold,
-    "build_material_instance_scaffold": build_material_instance_scaffold,
-    "build_behavior_tree_scaffold": build_behavior_tree_scaffold,
-    "build_input_action_scaffold": build_input_action_scaffold,
-    "build_input_mapping_context_scaffold": build_input_mapping_context_scaffold,
-    "build_state_tree_scaffold": build_state_tree_scaffold,
-    "build_control_rig_scaffold": build_control_rig_scaffold,
-    "build_niagara_scaffold": build_niagara_scaffold,
-    "build_eqs_scaffold": build_eqs_scaffold,
-    "build_sequencer_scaffold": build_sequencer_scaffold,
-    "build_metasound_scaffold": build_metasound_scaffold,
-    "build_pcg_scaffold": build_pcg_scaffold,
-    "build_motion_matching_scaffold": build_motion_matching_scaffold,
-    "build_ik_rig_scaffold": build_ik_rig_scaffold,
-}))
-
-
 def chunk_text(text, chunk_size=7000, overlap=400):
     if len(text) <= chunk_size:
         return [text]
@@ -2448,3 +2596,54 @@ def heuristic_log_summary(text, log_type="output"):
 
     examples = errors[:5] or warnings[:5] or lines[:5]
     return " ".join(summary) + "\n\nRelevant lines:\n" + "\n".join(examples)
+
+
+app.include_router(build_plugin_router({
+    "project_cache": PROJECT_CACHE,
+    "run_asset_action": run_asset_action,
+    "search_files": search_files,
+    "selection_analysis": selection_analysis,
+    "selection_request_class": SelectionRequest,
+    "client": client,
+    "system_prompt": lambda: SYSTEM_PROMPT,
+    "format_recent_history": format_recent_history,
+    "remember_interaction": remember_interaction,
+    "include_ai_summary": lambda: bool(os.getenv("OPENAI_API_KEY")),
+    "summarize_deep_asset_with_llm": summarize_deep_asset_with_llm,
+    "looks_like_rename_request": looks_like_rename_request,
+    "looks_like_function_request": looks_like_function_request,
+    "build_asset_rename_edit_plan": build_asset_rename_edit_plan,
+    "build_data_asset_edit_plan": build_data_asset_edit_plan,
+    "build_enhanced_input_edit_plan": build_enhanced_input_edit_plan,
+    "build_behavior_tree_edit_plan": build_behavior_tree_edit_plan,
+    "build_material_edit_plan": build_material_edit_plan,
+    "build_animbp_edit_plan": build_animbp_edit_plan,
+    "build_state_tree_edit_plan": build_state_tree_edit_plan,
+    "build_control_rig_edit_plan": build_control_rig_edit_plan,
+    "build_niagara_edit_plan": build_niagara_edit_plan,
+    "build_eqs_edit_plan": build_eqs_edit_plan,
+    "build_sequencer_edit_plan": build_sequencer_edit_plan,
+    "build_metasound_edit_plan": build_metasound_edit_plan,
+    "build_pcg_edit_plan": build_pcg_edit_plan,
+    "build_motion_matching_edit_plan": build_motion_matching_edit_plan,
+    "build_ik_rig_edit_plan": build_ik_rig_edit_plan,
+    "build_blueprint_function_edit_plan": build_blueprint_function_edit_plan,
+    "build_blueprint_variable_edit_plan": build_blueprint_variable_edit_plan,
+    "build_blueprint_class_scaffold": build_blueprint_class_scaffold,
+    "build_data_asset_scaffold": build_data_asset_scaffold,
+    "build_animbp_scaffold": build_animbp_scaffold,
+    "build_material_scaffold": build_material_scaffold,
+    "build_material_instance_scaffold": build_material_instance_scaffold,
+    "build_behavior_tree_scaffold": build_behavior_tree_scaffold,
+    "build_input_action_scaffold": build_input_action_scaffold,
+    "build_input_mapping_context_scaffold": build_input_mapping_context_scaffold,
+    "build_state_tree_scaffold": build_state_tree_scaffold,
+    "build_control_rig_scaffold": build_control_rig_scaffold,
+    "build_niagara_scaffold": build_niagara_scaffold,
+    "build_eqs_scaffold": build_eqs_scaffold,
+    "build_sequencer_scaffold": build_sequencer_scaffold,
+    "build_metasound_scaffold": build_metasound_scaffold,
+    "build_pcg_scaffold": build_pcg_scaffold,
+    "build_motion_matching_scaffold": build_motion_matching_scaffold,
+    "build_ik_rig_scaffold": build_ik_rig_scaffold,
+}))

@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+import re
+from collections import Counter
+from typing import Any
+
+
+def build_agent_task_plan(
+    *,
+    goal: str,
+    files: list[dict[str, Any]],
+    assets: list[dict[str, Any]],
+    matched_files: list[dict[str, Any]],
+    family_summaries: dict[str, Any],
+) -> dict[str, Any]:
+    normalized_goal = (goal or "").strip()
+    lowered_goal = normalized_goal.lower()
+
+    candidate_files = build_candidate_files(files, matched_files)
+    candidate_assets = build_candidate_assets(assets, lowered_goal)
+    task_type = classify_task_type(lowered_goal, candidate_assets)
+    systems = infer_systems(candidate_files)
+    suggested_routes = infer_suggested_routes(task_type, candidate_assets)
+    suggested_editor_actions = infer_suggested_editor_actions(task_type, candidate_assets)
+    stages = build_execution_stages(task_type, candidate_files, candidate_assets, systems)
+    risks = infer_task_risks(task_type, candidate_assets, systems)
+
+    result = {
+        "goal": normalized_goal,
+        "task_type": task_type,
+        "execution_mode": "plan_only",
+        "summary": build_summary(task_type, candidate_files, candidate_assets, systems),
+        "systems": systems,
+        "candidate_files": candidate_files[:8],
+        "candidate_assets": candidate_assets[:8],
+        "suggested_backend_routes": suggested_routes,
+        "suggested_editor_actions": suggested_editor_actions,
+        "stages": stages,
+        "risks": risks[:8],
+    }
+
+    family_hints = infer_family_hints(candidate_assets, family_summaries)
+    if family_hints:
+        result["family_hints"] = family_hints[:6]
+
+    return result
+
+
+def build_candidate_files(files: list[dict[str, Any]], matched_files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    file_by_path = {file_record["path"]: file_record for file_record in files}
+    candidates = []
+
+    for match in matched_files:
+        file_record = file_by_path.get(match.get("path", ""))
+        if not file_record:
+            continue
+        analysis = file_record.get("analysis", {})
+        candidates.append(
+            {
+                "path": file_record["path"],
+                "name": file_record["name"],
+                "score": analysis.get("centrality_score", 0),
+                "roles": analysis.get("roles", [])[:5],
+                "symbols": analysis.get("all_symbol_names", [])[:8],
+            }
+        )
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    return dedupe_dicts(candidates, key="path")
+
+
+def build_candidate_assets(assets: list[dict[str, Any]], lowered_goal: str) -> list[dict[str, Any]]:
+    goal_tokens = extract_tokens(lowered_goal)
+    scored_assets = []
+
+    for asset in assets:
+        asset_name = asset.get("name", "")
+        asset_path = asset.get("relative_path") or asset.get("path", "")
+        haystack = f"{asset_name} {asset_path} {asset.get('asset_type', '')} {asset.get('family', '')}".lower()
+        score = 0
+        matched_tokens = []
+        for token in goal_tokens:
+            if token in haystack:
+                score += 2
+                matched_tokens.append(token)
+        family = (asset.get("family") or "").lower()
+        if "input" in lowered_goal and family == "enhanced_input":
+            score += 4
+        if any(token in lowered_goal for token in ("material", "roughness", "texture", "color")) and family in {"material", "material_instance"}:
+            score += 4
+        if any(token in lowered_goal for token in ("ai", "behavior", "blackboard")) and family == "behavior_tree":
+            score += 4
+        if any(token in lowered_goal for token in ("animation", "anim", "locomotion")) and family == "animation":
+            score += 4
+        if score > 0:
+            scored_assets.append(
+                {
+                    "name": asset_name,
+                    "path": asset.get("path", ""),
+                    "relative_path": asset.get("relative_path", ""),
+                    "asset_type": asset.get("asset_type", ""),
+                    "family": asset.get("family", ""),
+                    "match_score": score,
+                    "matched_tokens": matched_tokens[:6],
+                }
+            )
+
+    scored_assets.sort(key=lambda item: item["match_score"], reverse=True)
+    return dedupe_dicts(scored_assets, key="path")
+
+
+def classify_task_type(lowered_goal: str, candidate_assets: list[dict[str, Any]]) -> str:
+    has_asset_candidates = bool(candidate_assets)
+    mentions_create = any(token in lowered_goal for token in ("create", "new ", "generate", "scaffold"))
+    mentions_code = any(
+        token in lowered_goal
+        for token in (
+            "code",
+            "c++",
+            "class",
+            ".h",
+            ".cpp",
+            "function",
+            "component",
+            "system",
+            "module",
+            "character",
+            "controller",
+            "pawn",
+            "actor",
+        )
+    )
+    mentions_change = any(token in lowered_goal for token in ("add", "update", "modify", "change", "hook", "wire", "rename", "set", "fix"))
+    mentions_analysis = any(token in lowered_goal for token in ("explain", "analyze", "inspect", "understand", "where", "how"))
+    mentions_asset_family = any(asset.get("family") for asset in candidate_assets)
+
+    if mentions_create and mentions_code and has_asset_candidates:
+        return "hybrid_feature"
+    if mentions_change and mentions_code and mentions_asset_family:
+        return "hybrid_feature"
+    if mentions_create and mentions_code:
+        return "code_generation"
+    if mentions_create and mentions_asset_family:
+        return "asset_creation"
+    if mentions_change and mentions_asset_family:
+        return "asset_edit"
+    if mentions_change and mentions_code:
+        return "code_change"
+    if mentions_analysis or not has_asset_candidates:
+        return "investigation"
+    return "task_plan"
+
+
+def infer_systems(candidate_files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    role_counter = Counter()
+    for item in candidate_files:
+        role_counter.update(item.get("roles", []))
+    return [{"name": role, "count": count} for role, count in role_counter.most_common(6)]
+
+
+def infer_suggested_routes(task_type: str, candidate_assets: list[dict[str, Any]]) -> list[str]:
+    routes = ["/task-workflow"]
+    if task_type in {"investigation", "code_change", "hybrid_feature"}:
+        routes.append("/ask")
+    if candidate_assets:
+        routes.append("/plugin/selection-context")
+        routes.append("/plugin/asset-details")
+    if task_type in {"asset_edit", "hybrid_feature"}:
+        routes.append("/plugin/asset-edit-plan")
+    if task_type in {"asset_creation", "hybrid_feature"}:
+        routes.append("/asset-scaffold")
+    return dedupe_strings(routes)
+
+
+def infer_suggested_editor_actions(task_type: str, candidate_assets: list[dict[str, Any]]) -> list[str]:
+    actions = []
+    families = {(item.get("family") or "").lower() for item in candidate_assets}
+
+    if task_type in {"asset_creation", "hybrid_feature"}:
+        actions.append("create_asset")
+    if task_type in {"asset_edit", "hybrid_feature"}:
+        actions.append("rename_asset")
+    if "material_instance" in families or "material" in families:
+        actions.append("tweak_material_parameter")
+
+    return dedupe_strings(actions)
+
+
+def build_execution_stages(
+    task_type: str,
+    candidate_files: list[dict[str, Any]],
+    candidate_assets: list[dict[str, Any]],
+    systems: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    lead_file = candidate_files[0]["path"] if candidate_files else ""
+    lead_asset = candidate_assets[0]["name"] if candidate_assets else ""
+    lead_systems = ", ".join(item["name"] for item in systems[:3]) or "gameplay ownership"
+
+    stages = [
+        {
+            "name": "Scope",
+            "goal": f"Confirm the task owner and entry points across {lead_systems}.",
+            "recommended_actions": dedupe_strings(
+                [
+                    f"Inspect `{lead_file}` first." if lead_file else "",
+                    f"Inspect `{lead_asset}` first." if lead_asset else "",
+                    "Review current selection, asset links, and high-signal files before changing behavior.",
+                ]
+            ),
+        }
+    ]
+
+    if task_type in {"code_generation", "code_change", "hybrid_feature"}:
+        stages.append(
+            {
+                "name": "Code Plan",
+                "goal": "Identify the smallest code patch that satisfies the request.",
+                "recommended_actions": [
+                    "Trace the public entry point, owner class, and adjacent helper/component boundaries.",
+                    "Prefer a narrow patch over broad refactors so compile feedback stays actionable.",
+                ],
+            }
+        )
+
+    if task_type in {"asset_creation", "asset_edit", "hybrid_feature"}:
+        stages.append(
+            {
+                "name": "Asset Plan",
+                "goal": "Decide which asset-side changes belong in Unreal content versus code.",
+                "recommended_actions": [
+                    "Generate or review a scaffold/edit plan before mutating assets.",
+                    "Keep editor-side actions confirmation-gated and as small as possible.",
+                ],
+            }
+        )
+
+    stages.append(
+        {
+            "name": "Validation",
+            "goal": "Verify compile/runtime/editor behavior after the smallest useful change.",
+            "recommended_actions": [
+                "Run backend tests or compile checks before broadening the change.",
+                "Validate runtime flow in PIE/editor after content or code updates.",
+            ],
+        }
+    )
+    return stages
+
+
+def infer_task_risks(task_type: str, candidate_assets: list[dict[str, Any]], systems: list[dict[str, Any]]) -> list[str]:
+    risks = [
+        "Ownership can drift quickly if both code and Blueprint/content are edited without a clear source of truth.",
+        "Narrow previewed editor actions are safer than broad inferred mutations.",
+    ]
+
+    families = {(item.get("family") or "").lower() for item in candidate_assets}
+    if task_type in {"code_generation", "code_change", "hybrid_feature"}:
+        risks.append("Generated code may compile cleanly but still miss Unreal ownership, registration, or binding paths.")
+    if "enhanced_input" in families:
+        risks.append("Input changes often fail because the Mapping Context or binding layer is wrong, not because the asset is missing.")
+    if "material" in families or "material_instance" in families:
+        risks.append("Material edits can be overridden at runtime by dynamic material instances or parameter writes.")
+    if any(item["name"] == "player" for item in systems):
+        risks.append("Player-facing changes often cross controller, pawn, and component boundaries, so a single-file fix may be incomplete.")
+    return dedupe_strings(risks)
+
+
+def infer_family_hints(candidate_assets: list[dict[str, Any]], family_summaries: dict[str, Any]) -> list[str]:
+    hints = []
+    summary_key_map = {
+        "blueprint": "blueprints",
+        "animation": "animbps",
+        "behavior_tree": "behavior_trees",
+        "data_asset": "data_assets",
+        "enhanced_input": "enhanced_input",
+        "material": "materials",
+        "material_instance": "materials",
+        "state_tree": "state_trees",
+        "control_rig": "control_rig",
+        "niagara": "niagara",
+        "eqs": "eqs",
+        "sequencer": "sequencer",
+        "metasound": "metasounds",
+        "pcg": "pcg",
+        "motion_matching": "motion_matching",
+        "ik_rig": "ik_rig",
+    }
+    for asset in candidate_assets[:4]:
+        family = (asset.get("family") or "").lower()
+        summary = family_summaries.get(summary_key_map.get(family, family))
+        if not summary:
+            continue
+        for bridge in summary.get("bridge_points", [])[:2]:
+            hints.append(f"{asset['name']}: {bridge}")
+    return dedupe_strings(hints)
+
+
+def build_summary(task_type: str, candidate_files: list[dict[str, Any]], candidate_assets: list[dict[str, Any]], systems: list[dict[str, Any]]) -> str:
+    file_part = candidate_files[0]["name"] if candidate_files else "no clear file owner yet"
+    asset_part = candidate_assets[0]["name"] if candidate_assets else "no clear asset owner yet"
+    system_part = ", ".join(item["name"] for item in systems[:3]) or "general gameplay code"
+    return f"This looks like a `{task_type}` task centered on {system_part}, with `{file_part}` and `{asset_part}` as the strongest initial leads."
+
+
+def extract_tokens(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z][a-z0-9_]{2,}", text.lower()) if len(token) > 2}
+
+
+def dedupe_strings(items: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for item in items:
+        value = (item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def dedupe_dicts(items: list[dict[str, Any]], *, key: str) -> list[dict[str, Any]]:
+    seen = set()
+    result = []
+    for item in items:
+        value = item.get(key)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(item)
+    return result

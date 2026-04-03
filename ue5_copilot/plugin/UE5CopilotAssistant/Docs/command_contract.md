@@ -95,6 +95,7 @@ The backend can already return scaffold, inspection, and edit-plan payloads for 
 The plugin currently executes these safe editor actions:
 - `rename_asset`
 - `create_asset` for `blueprint_class`
+- `create_asset` for `data_asset`
 - `create_asset` for `input_action`
 - `create_asset` for `input_mapping_context`
 - `create_asset` for `material_instance`

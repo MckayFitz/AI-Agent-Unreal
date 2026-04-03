@@ -140,6 +140,18 @@ def build_plugin_router(deps):
             },
         }
 
+    def build_data_asset_scaffold_editor_action(response):
+        editor_action = build_simple_scaffold_editor_action(response, "data_asset")
+        if not editor_action:
+            return None
+
+        recommended_class_name = (response.get("recommended_class_name") or "").strip()
+        if not recommended_class_name:
+            return None
+
+        editor_action["arguments"]["asset_class"] = recommended_class_name
+        return editor_action
+
     def build_asset_scaffold_response(request: AssetScaffoldRequest):
         asset_kind = request.asset_kind.strip().lower()
         name = request.name.strip()
@@ -160,7 +172,11 @@ def build_plugin_router(deps):
                 response["editor_action"] = editor_action
             return response
         if resolved == "data_asset":
-            return deps["build_data_asset_scaffold"](name=name, purpose=purpose, class_name=class_name)
+            response = deps["build_data_asset_scaffold"](name=name, purpose=purpose, class_name=class_name)
+            editor_action = build_data_asset_scaffold_editor_action(response)
+            if editor_action:
+                response["editor_action"] = editor_action
+            return response
         if resolved == "animbp":
             return deps["build_animbp_scaffold"](name=name, purpose=purpose, class_name=class_name)
         if resolved == "material":
