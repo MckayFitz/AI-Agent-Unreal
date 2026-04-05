@@ -34,6 +34,20 @@
   },
   "commands": [
     {
+      "name": "plugin_chat",
+      "direction": "plugin_to_backend",
+      "description": "Primary plugin request path for free-form questions and broader implementation goals. The backend may answer directly, return a single plan, or start a live agent session.",
+      "payload_schema": {
+        "message": "string",
+        "selection_name": "string",
+        "selection_type": "string",
+        "asset_path": "string",
+        "class_name": "string",
+        "exported_text": "string"
+      },
+      "mapped_backend_route": "/plugin/chat"
+    },
+    {
       "name": "selection_context",
       "direction": "plugin_to_backend",
       "description": "Send current editor selection for explanation and asset-aware analysis.",
@@ -79,6 +93,24 @@
         "change_request": "string"
       },
       "mapped_backend_route": "/asset-edit-plan"
+    },
+    {
+      "name": "agent_session",
+      "direction": "plugin_to_backend",
+      "description": "Start or continue a staged backend workflow for multi-step goals that may require confirmation before editor-side changes.",
+      "payload_schema": {
+        "goal": "string",
+        "task_id": "string",
+        "decision": "approve|reject"
+      },
+      "mapped_backend_route": "/agent-session and /agent-session/{task_id}/*",
+      "preferred_paths": {
+        "start": "/agent-session",
+        "status": "/agent-session/{task_id}/status",
+        "approve_and_continue": "/agent-session/{task_id}/confirm-and-continue",
+        "manual_confirm": "/agent-session/{task_id}/confirm",
+        "manual_resume": "/agent-session/{task_id}/resume"
+      }
     },
     {
       "name": "execute_editor_action",
@@ -130,6 +162,8 @@
   ],
   "safety_rules": [
     "The backend may suggest editor_action objects, but the plugin is the final safety gate.",
+    "The backend may also return a live agent session with steps, pending confirmation, and next actions; the plugin should treat that as resumable workflow state rather than a one-shot answer.",
+    "When approval should immediately continue backend-side follow-up planning, prefer /agent-session/{task_id}/confirm-and-continue over separate confirm and resume calls.",
     "The plugin must reject any action whose target asset no longer matches the current editor state.",
     "All mutating actions should support dry_run first.",
     "Renames and edits should require explicit user confirmation in the plugin UI.",

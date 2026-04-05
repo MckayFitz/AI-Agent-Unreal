@@ -10,9 +10,14 @@ class FUE5CopilotAssistantModule : public IModuleInterface
 public:
     virtual void StartupModule() override;
     virtual void ShutdownModule() override;
+    void RefreshPendingCodePatchBundleTargets(const TArray<FString>& TargetPaths, const FString& PreferredTargetPath = FString());
+    void ClearPendingCodePatchBundleTargets();
+    void SetCurrentAgentTaskId(const FString& TaskId);
+    void ClearCurrentAgentTaskId();
 
 private:
     bool StartBackendProcess(FString& OutError);
+    void EnsureBackendAvailable(TFunction<void()> OnReady, const TSharedPtr<class STextBlock>& StatusText);
     void EnsureBackendAndSendRequest(
         const FString& Url,
         const FString& Payload,
@@ -21,7 +26,7 @@ private:
         const TSharedPtr<class SMultiLineEditableTextBox>& CodeDiffPreviewTextBox,
         const TSharedPtr<class SMultiLineEditableTextBox>& EditorActionPreviewTextBox,
         const TSharedPtr<class SEditableTextBox>& BundleApplyTargetPathTextBox,
-        FString* PendingEditorActionJson,
+        FString* PendingEditorActionJsonPtr,
         const TSharedPtr<class STextBlock>& StatusText);
     void LoadSettings();
     void SaveSettings() const;
@@ -34,9 +39,6 @@ private:
     void RequestAssetDetailsForSelection(FAssetData AssetData);
     void RequestAssetEditPlanForSelection(FAssetData AssetData);
     TSharedRef<class SDockTab> SpawnAssistantTab(const class FSpawnTabArgs& SpawnTabArgs);
-    void RefreshPendingCodePatchBundleTargets(const TArray<FString>& TargetPaths, const FString& PreferredTargetPath = FString());
-    void ClearPendingCodePatchBundleTargets();
-
     FString CurrentBackendBaseUrl = TEXT("http://127.0.0.1:8000");
     FString BackendLaunchCommand;
     TSharedPtr<class SEditableTextBox> BackendBaseUrlTextBoxPtr;

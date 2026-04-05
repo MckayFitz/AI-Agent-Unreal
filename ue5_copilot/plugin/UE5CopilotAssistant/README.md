@@ -1,4 +1,4 @@
-# UE5 Copilot Assistant Plugin
+# FitzAI Plugin
 
 This is a starter Unreal Editor plugin scaffold for the FastAPI app in this repo.
 
@@ -10,6 +10,7 @@ What it includes:
 - Prompt box
 - Broad task-planning button for multi-step goals
 - Live agent-task session controls for start, refresh, approval, rejection, and resume
+- Automatic live agent-session capture when a broad `/plugin/chat` request escalates into workflow mode
 - Asset scaffold planner inputs
 - Deep asset text box
 - Output panel
@@ -17,7 +18,7 @@ What it includes:
 - Dedicated code diff preview panel for narrow C++ draft responses
 - Editor action preview panel
 - Pending bundle file picker plus optional single-file apply control for previewed code patch bundles
-- HTTP `POST` to the backend `/ask` route
+- HTTP `POST` to the backend `/plugin/chat` route for normal chat, asset help, and auto-escalated agent workflows
 - Current editor selection bridge for selected actors or Content Browser assets
 - Selection payload `POST` to the backend `/plugin/selection-context` route
 - Selected asset inspector payload `POST` to the backend `/plugin/asset-details` route
@@ -38,12 +39,12 @@ How to try it:
 2. Regenerate project files if needed.
 3. Build the editor target.
 4. Enable the plugin in Unreal.
-5. Open `Window -> UE5 Copilot`.
+5. Open `Window -> FitzAI`.
 6. Make sure the FastAPI backend is running and the project has already been scanned.
-7. Use `Send` for free-form questions, `Start Agent Task` to launch a live backend task session, or `Draft Code Diff` for a narrow C++ diff preview.
-8. When the agent session pauses for confirmation, use `Approve Agent Step` or `Reject Agent Step` for the current pending action.
+7. Use `Send` for the normal smart path: direct chat for simple questions, or automatic escalation into a live backend agent session for broader work. Use `Force Agent Workflow` when you want to skip straight to staged workflow mode, or `Draft Code Diff` for a narrow C++ diff preview.
+8. When the agent session pauses for confirmation, use `Approve And Continue` or `Reject Agent Step` for the current pending action.
 9. After approval, the plugin keeps the approved editor action preview alive so you can still apply it through the normal editor-action controls.
-10. Use `Refresh Agent Status` to pull the latest backend state for the current task, and `Resume Agent Task` to continue the workflow after approval.
+10. The plugin now uses the backend `confirm-and-continue` flow for approval, so follow-up planning continues in one round trip. `Refresh Agent Status` and `Resume Agent Task` are still available when you want manual control.
 11. Watch the dedicated `Agent Session` panel for the current task id, status, next action, previewed action, recent step, and any pending confirmation summary.
 12. When drafting a code diff, optionally fill in the code target path box to point the preview at a specific `.h` or `.cpp` file.
 13. When a previewed code patch bundle is pending, the plugin will populate a dropdown of remaining bundle files and auto-select the first one for you.
@@ -52,7 +53,7 @@ How to try it:
 16. Use `Explain Selected Asset` to inspect the current asset with references, inferred owners, and gameplay role.
 17. Write a requested change in the prompt box and use `Plan Asset Change` for a safe asset-specific edit plan.
 18. Choose an asset kind, paste exported graph/state text, and use `Deep Analyze Selected Asset` for Phase 2-style asset analysis.
-19. You can also right-click a Content Browser asset and use the `UE5 Copilot` entries to inspect it or plan a change.
+19. You can also right-click a Content Browser asset and use the `FitzAI` entries to inspect it or plan a change.
 
 What the backend can already plan today:
 - Structured multi-step task plans through `/agent-task` for natural-language goals that may span code, assets, and validation

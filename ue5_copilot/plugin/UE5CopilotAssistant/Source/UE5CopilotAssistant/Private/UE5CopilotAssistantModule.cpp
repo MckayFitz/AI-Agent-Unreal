@@ -50,6 +50,8 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SComboBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
 #include "WorkspaceMenuStructureModule.h"
@@ -517,6 +519,11 @@ namespace UE5CopilotAssistant
         return FString::Printf(TEXT("{\"question\":\"%s\"}"), *EscapeJson(Prompt));
     }
 
+    FString GetCurrentProjectPathForPayload()
+    {
+        return FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+    }
+
     FString BuildPluginChatPayload(
         const FString& Message,
         const FString& SelectionName,
@@ -525,37 +532,43 @@ namespace UE5CopilotAssistant
         const FString& ClassName,
         const FString& ExportedText)
     {
+        const FString ProjectPath = GetCurrentProjectPathForPayload();
         return FString::Printf(
-            TEXT("{\"message\":\"%s\",\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"exported_text\":\"%s\",\"source\":\"ue5_plugin\"}"),
+            TEXT("{\"message\":\"%s\",\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"exported_text\":\"%s\",\"project_path\":\"%s\",\"source\":\"ue5_plugin\"}"),
             *EscapeJson(Message),
             *EscapeJson(SelectionName),
             *EscapeJson(SelectionType),
             *EscapeJson(AssetPath),
             *EscapeJson(ClassName),
-            *EscapeJson(ExportedText)
+            *EscapeJson(ExportedText),
+            *EscapeJson(ProjectPath)
         );
     }
 
     FString BuildSelectionPayload(const FString& SelectionName, const FString& SelectionType, const FString& AssetPath, const FString& ClassName)
     {
+        const FString ProjectPath = GetCurrentProjectPathForPayload();
         return FString::Printf(
-            TEXT("{\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"source\":\"ue5_plugin\"}"),
+            TEXT("{\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"project_path\":\"%s\",\"source\":\"ue5_plugin\"}"),
             *EscapeJson(SelectionName),
             *EscapeJson(SelectionType),
             *EscapeJson(AssetPath),
-            *EscapeJson(ClassName)
+            *EscapeJson(ClassName),
+            *EscapeJson(ProjectPath)
         );
     }
 
     FString BuildDeepAssetPayload(const FString& AssetKind, const FString& ExportedText, const FString& SelectionName, const FString& AssetPath, const FString& ClassName)
     {
+        const FString ProjectPath = GetCurrentProjectPathForPayload();
         return FString::Printf(
-            TEXT("{\"asset_kind\":\"%s\",\"exported_text\":\"%s\",\"selection_name\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"source\":\"ue5_plugin\"}"),
+            TEXT("{\"asset_kind\":\"%s\",\"exported_text\":\"%s\",\"selection_name\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"project_path\":\"%s\",\"source\":\"ue5_plugin\"}"),
             *EscapeJson(AssetKind),
             *EscapeJson(ExportedText),
             *EscapeJson(SelectionName),
             *EscapeJson(AssetPath),
-            *EscapeJson(ClassName)
+            *EscapeJson(ClassName),
+            *EscapeJson(ProjectPath)
         );
     }
 
@@ -812,24 +825,28 @@ namespace UE5CopilotAssistant
 
     FString BuildPluginAssetDetailsPayload(const FString& SelectionName, const FString& SelectionType, const FString& AssetPath, const FString& ClassName)
     {
+        const FString ProjectPath = GetCurrentProjectPathForPayload();
         return FString::Printf(
-            TEXT("{\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"source\":\"ue5_plugin\"}"),
+            TEXT("{\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"project_path\":\"%s\",\"source\":\"ue5_plugin\"}"),
             *EscapeJson(SelectionName),
             *EscapeJson(SelectionType),
             *EscapeJson(AssetPath),
-            *EscapeJson(ClassName)
+            *EscapeJson(ClassName),
+            *EscapeJson(ProjectPath)
         );
     }
 
     FString BuildPluginAssetEditPlanPayload(const FString& SelectionName, const FString& SelectionType, const FString& AssetPath, const FString& ClassName, const FString& ChangeRequest)
     {
+        const FString ProjectPath = GetCurrentProjectPathForPayload();
         return FString::Printf(
-            TEXT("{\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"change_request\":\"%s\",\"source\":\"ue5_plugin\"}"),
+            TEXT("{\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"change_request\":\"%s\",\"project_path\":\"%s\",\"source\":\"ue5_plugin\"}"),
             *EscapeJson(SelectionName),
             *EscapeJson(SelectionType),
             *EscapeJson(AssetPath),
             *EscapeJson(ClassName),
-            *EscapeJson(ChangeRequest)
+            *EscapeJson(ChangeRequest),
+            *EscapeJson(ProjectPath)
         );
     }
 
@@ -846,9 +863,11 @@ namespace UE5CopilotAssistant
 
     FString BuildAgentTaskPayload(const FString& Goal)
     {
+        const FString ProjectPath = GetCurrentProjectPathForPayload();
         return FString::Printf(
-            TEXT("{\"goal\":\"%s\"}"),
-            *EscapeJson(Goal)
+            TEXT("{\"goal\":\"%s\",\"project_path\":\"%s\"}"),
+            *EscapeJson(Goal),
+            *EscapeJson(ProjectPath)
         );
     }
 
@@ -1413,10 +1432,10 @@ namespace UE5CopilotAssistant
     void SyncPreviewEditorAction(
         const TSharedPtr<FJsonObject>& JsonObject,
         const TSharedPtr<SEditableTextBox>& BundleApplyTargetPathTextBox,
-        FString* PendingEditorActionJson,
+        FString* PendingEditorActionJsonPtr,
         FString& EditorActionPreview)
     {
-        if (!PendingEditorActionJson)
+        if (!PendingEditorActionJsonPtr)
         {
             return;
         }
@@ -1424,7 +1443,7 @@ namespace UE5CopilotAssistant
         const TSharedPtr<FJsonObject> PreviewEditorAction = ExtractPreviewEditorAction(JsonObject);
         if (!PreviewEditorAction.IsValid())
         {
-            PendingEditorActionJson->Reset();
+            PendingEditorActionJsonPtr->Reset();
             if (FUE5CopilotAssistantModule* Module = FModuleManager::GetModulePtr<FUE5CopilotAssistantModule>(TEXT("UE5CopilotAssistant")))
             {
                 Module->ClearPendingCodePatchBundleTargets();
@@ -1432,7 +1451,7 @@ namespace UE5CopilotAssistant
             return;
         }
 
-        *PendingEditorActionJson = SerializeJsonObject(PreviewEditorAction);
+        *PendingEditorActionJsonPtr = SerializeJsonObject(PreviewEditorAction);
         const TSharedPtr<FJsonObject> WrapperObject = MakeShared<FJsonObject>();
         WrapperObject->SetObjectField(TEXT("editor_action"), PreviewEditorAction);
         EditorActionPreview = FormatEditorActionPreview(WrapperObject);
@@ -1556,7 +1575,7 @@ namespace UE5CopilotAssistant
         const TSharedPtr<SMultiLineEditableTextBox>& CodeDiffPreviewTextBox,
         const TSharedPtr<SMultiLineEditableTextBox>& EditorActionPreviewTextBox,
         const TSharedPtr<SEditableTextBox>& BundleApplyTargetPathTextBox,
-        FString* PendingEditorActionJson,
+        FString* PendingEditorActionJsonPtr,
         const TSharedPtr<STextBlock>& StatusText)
     {
         TSharedPtr<FJsonObject> JsonObject;
@@ -1599,21 +1618,21 @@ namespace UE5CopilotAssistant
                 FString TaskId;
                 if (JsonObject->TryGetStringField(TEXT("task_id"), TaskId) && !TaskId.IsEmpty())
                 {
-                    Module->CurrentAgentTaskId = TaskId;
+                    Module->SetCurrentAgentTaskId(TaskId);
                 }
                 else
                 {
-                    Module->CurrentAgentTaskId.Reset();
+                    Module->ClearCurrentAgentTaskId();
                 }
             }
-            SyncPreviewEditorAction(JsonObject, BundleApplyTargetPathTextBox, PendingEditorActionJson, EditorActionPreview);
+            SyncPreviewEditorAction(JsonObject, BundleApplyTargetPathTextBox, PendingEditorActionJsonPtr, EditorActionPreview);
         }
-        else if (PendingEditorActionJson)
+        else if (PendingEditorActionJsonPtr)
         {
-            PendingEditorActionJson->Reset();
+            PendingEditorActionJsonPtr->Reset();
             if (FUE5CopilotAssistantModule* Module = FModuleManager::GetModulePtr<FUE5CopilotAssistantModule>(TEXT("UE5CopilotAssistant")))
             {
-                Module->CurrentAgentTaskId.Reset();
+                Module->ClearCurrentAgentTaskId();
                 Module->ClearPendingCodePatchBundleTargets();
             }
         }
@@ -1649,7 +1668,7 @@ namespace UE5CopilotAssistant
         const TSharedPtr<SMultiLineEditableTextBox>& CodeDiffPreviewTextBox,
         const TSharedPtr<SMultiLineEditableTextBox>& EditorActionPreviewTextBox,
         const TSharedPtr<SEditableTextBox>& BundleApplyTargetPathTextBox,
-        FString* PendingEditorActionJson,
+        FString* PendingEditorActionJsonPtr,
         const TSharedPtr<STextBlock>& StatusText)
     {
         TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
@@ -1659,7 +1678,7 @@ namespace UE5CopilotAssistant
         Request->SetContentAsString(Payload);
 
         Request->OnProcessRequestComplete().BindLambda(
-            [OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJson, StatusText](FHttpRequestPtr HttpRequest, FHttpResponsePtr HttpResponse, bool bSucceeded)
+            [OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJsonPtr, StatusText](FHttpRequestPtr HttpRequest, FHttpResponsePtr HttpResponse, bool bSucceeded)
             {
                 if (!bSucceeded || !HttpResponse.IsValid())
                 {
@@ -1679,9 +1698,9 @@ namespace UE5CopilotAssistant
                     {
                         EditorActionPreviewTextBox->SetText(LOCTEXT("UE5CopilotEditorActionPreviewFailed", "No editor action preview available because the request failed."));
                     }
-                    if (PendingEditorActionJson)
+                    if (PendingEditorActionJsonPtr)
                     {
-                        PendingEditorActionJson->Reset();
+                        PendingEditorActionJsonPtr->Reset();
                     }
                     if (FUE5CopilotAssistantModule* Module = FModuleManager::GetModulePtr<FUE5CopilotAssistantModule>(TEXT("UE5CopilotAssistant")))
                     {
@@ -1690,7 +1709,7 @@ namespace UE5CopilotAssistant
                     return;
                 }
 
-                HandleJsonResponse(HttpResponse->GetContentAsString(), OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJson, StatusText);
+                HandleJsonResponse(HttpResponse->GetContentAsString(), OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJsonPtr, StatusText);
             }
         );
 
@@ -1815,8 +1834,8 @@ void FUE5CopilotAssistantModule::RegisterMenus()
     FToolMenuSection& Section = Menu->FindOrAddSection("WindowLayout");
     Section.AddMenuEntry(
         "OpenUE5CopilotAssistant",
-        LOCTEXT("OpenUE5CopilotAssistant", "UE5 Copilot"),
-        LOCTEXT("OpenUE5CopilotAssistantTooltip", "Open the UE5 Copilot assistant tab."),
+        LOCTEXT("OpenUE5CopilotAssistant", "FitzAI"),
+        LOCTEXT("OpenUE5CopilotAssistantTooltip", "Open the FitzAI assistant tab."),
         FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"),
         FUIAction(FExecuteAction::CreateLambda([]()
         {
@@ -1851,7 +1870,7 @@ bool FUE5CopilotAssistantModule::StartBackendProcess(FString& OutError)
         return false;
     }
 
-    const FString ComSpec = FPlatformProcess::GetEnvironmentVariable(TEXT("ComSpec"));
+    const FString ComSpec = FPlatformMisc::GetEnvironmentVariable(TEXT("ComSpec"));
     if (ComSpec.IsEmpty())
     {
         OutError = TEXT("Could not resolve the system command shell for launching the backend.");
@@ -1870,26 +1889,26 @@ bool FUE5CopilotAssistantModule::StartBackendProcess(FString& OutError)
     return true;
 }
 
-void FUE5CopilotAssistantModule::EnsureBackendAndSendRequest(
-    const FString& Url,
-    const FString& Payload,
-    const TSharedPtr<SMultiLineEditableTextBox>& OutputTextBox,
-    const TSharedPtr<SMultiLineEditableTextBox>& AgentSessionTextBox,
-    const TSharedPtr<SMultiLineEditableTextBox>& CodeDiffPreviewTextBox,
-    const TSharedPtr<SMultiLineEditableTextBox>& EditorActionPreviewTextBox,
-    const TSharedPtr<SEditableTextBox>& BundleApplyTargetPathTextBox,
-    FString* PendingEditorActionJson,
-    const TSharedPtr<STextBlock>& StatusText)
+void FUE5CopilotAssistantModule::EnsureBackendAvailable(TFunction<void()> OnReady, const TSharedPtr<STextBlock>& StatusText)
 {
+    if (CurrentBackendBaseUrl.IsEmpty())
+    {
+        CurrentBackendBaseUrl = TEXT("http://127.0.0.1:8000");
+    }
+
     TSharedRef<IHttpRequest, ESPMode::ThreadSafe> StatusRequest = FHttpModule::Get().CreateRequest();
     StatusRequest->SetURL(CurrentBackendBaseUrl + TEXT("/status"));
     StatusRequest->SetVerb(TEXT("GET"));
     StatusRequest->OnProcessRequestComplete().BindLambda(
-        [this, Url, Payload, OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJson, StatusText](FHttpRequestPtr, FHttpResponsePtr HttpResponse, bool bSucceeded)
+        [this, OnReady, StatusText](FHttpRequestPtr, FHttpResponsePtr HttpResponse, bool bSucceeded)
         {
             if (bSucceeded && HttpResponse.IsValid() && EHttpResponseCodes::IsOk(HttpResponse->GetResponseCode()))
             {
-                UE5CopilotAssistant::SendPostRequest(Url, Payload, OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJson, StatusText);
+                if (StatusText.IsValid())
+                {
+                    StatusText->SetText(LOCTEXT("UE5CopilotBackendConnected", "Connected."));
+                }
+                OnReady();
                 return;
             }
 
@@ -1897,7 +1916,7 @@ void FUE5CopilotAssistantModule::EnsureBackendAndSendRequest(
             {
                 if (StatusText.IsValid())
                 {
-                    StatusText->SetText(LOCTEXT("UE5CopilotBackendStillStarting", "Backend is still starting. Please wait a moment and try again."));
+                    StatusText->SetText(LOCTEXT("UE5CopilotBackendStillStarting", "Backend is still starting. Please wait a moment."));
                 }
                 return;
             }
@@ -1920,20 +1939,24 @@ void FUE5CopilotAssistantModule::EnsureBackendAndSendRequest(
 
             TSharedPtr<int32> AttemptsRemaining = MakeShared<int32>(20);
             FTSTicker::GetCoreTicker().AddTicker(
-                FTickerDelegate::CreateLambda([this, Url, Payload, OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJson, StatusText, AttemptsRemaining](float)
+                FTickerDelegate::CreateLambda([this, OnReady, StatusText, AttemptsRemaining](float)
                 {
                     TSharedRef<IHttpRequest, ESPMode::ThreadSafe> PollRequest = FHttpModule::Get().CreateRequest();
                     PollRequest->SetURL(CurrentBackendBaseUrl + TEXT("/status"));
                     PollRequest->SetVerb(TEXT("GET"));
                     PollRequest->OnProcessRequestComplete().BindLambda(
-                        [this, Url, Payload, OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJson, StatusText, AttemptsRemaining](FHttpRequestPtr, FHttpResponsePtr PollResponse, bool bPollSucceeded)
+                        [this, OnReady, StatusText, AttemptsRemaining](FHttpRequestPtr, FHttpResponsePtr PollResponse, bool bPollSucceeded)
                         {
                             if (bPollSucceeded && PollResponse.IsValid() && EHttpResponseCodes::IsOk(PollResponse->GetResponseCode()))
                             {
                                 bBackendStartupInProgress = false;
-            UE5CopilotAssistant::SendPostRequest(Url, Payload, OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJson, StatusText);
-            return;
-        }
+                                if (StatusText.IsValid())
+                                {
+                                    StatusText->SetText(LOCTEXT("UE5CopilotBackendConnectedAfterStart", "Connected."));
+                                }
+                                OnReady();
+                                return;
+                            }
 
                             *AttemptsRemaining -= 1;
                             if (*AttemptsRemaining <= 0)
@@ -1941,7 +1964,7 @@ void FUE5CopilotAssistantModule::EnsureBackendAndSendRequest(
                                 bBackendStartupInProgress = false;
                                 if (StatusText.IsValid())
                                 {
-                                    StatusText->SetText(LOCTEXT("UE5CopilotBackendStartTimeout", "Backend launch was attempted, but it did not become reachable yet. Check the launch command and Python environment."));
+                                    StatusText->SetText(LOCTEXT("UE5CopilotBackendStartTimeout", "Backend launch was attempted, but it is not reachable yet. Open More Tools > Setup if needed."));
                                 }
                             }
                         });
@@ -1951,6 +1974,25 @@ void FUE5CopilotAssistantModule::EnsureBackendAndSendRequest(
                 0.5f);
         });
     StatusRequest->ProcessRequest();
+}
+
+void FUE5CopilotAssistantModule::EnsureBackendAndSendRequest(
+    const FString& Url,
+    const FString& Payload,
+    const TSharedPtr<SMultiLineEditableTextBox>& OutputTextBox,
+    const TSharedPtr<SMultiLineEditableTextBox>& AgentSessionTextBox,
+    const TSharedPtr<SMultiLineEditableTextBox>& CodeDiffPreviewTextBox,
+    const TSharedPtr<SMultiLineEditableTextBox>& EditorActionPreviewTextBox,
+    const TSharedPtr<SEditableTextBox>& BundleApplyTargetPathTextBox,
+    FString* PendingEditorActionJsonPtr,
+    const TSharedPtr<STextBlock>& StatusText)
+{
+    EnsureBackendAvailable(
+        [Url, Payload, OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJsonPtr, StatusText]()
+        {
+            UE5CopilotAssistant::SendPostRequest(Url, Payload, OutputTextBox, AgentSessionTextBox, CodeDiffPreviewTextBox, EditorActionPreviewTextBox, BundleApplyTargetPathTextBox, PendingEditorActionJsonPtr, StatusText);
+        },
+        StatusText);
 }
 
 void FUE5CopilotAssistantModule::OpenAssistantTab()
@@ -2042,16 +2084,16 @@ void FUE5CopilotAssistantModule::AddAssetContextMenuEntries(FMenuBuilder& MenuBu
     }
 
     const FAssetData AssetData = SelectedAssets[0];
-    MenuBuilder.BeginSection("UE5CopilotAssistant", LOCTEXT("UE5CopilotContextSection", "UE5 Copilot"));
+    MenuBuilder.BeginSection("UE5CopilotAssistant", LOCTEXT("UE5CopilotContextSection", "FitzAI"));
     MenuBuilder.AddMenuEntry(
         LOCTEXT("UE5CopilotContextExplain", "Explain Selected Asset"),
-        LOCTEXT("UE5CopilotContextExplainTooltip", "Inspect this asset with UE5 Copilot."),
+        LOCTEXT("UE5CopilotContextExplainTooltip", "Inspect this asset with FitzAI."),
         FSlateIcon(),
         FUIAction(FExecuteAction::CreateRaw(this, &FUE5CopilotAssistantModule::RequestAssetDetailsForSelection, AssetData))
     );
     MenuBuilder.AddMenuEntry(
         LOCTEXT("UE5CopilotContextPlan", "Plan Asset Change"),
-        LOCTEXT("UE5CopilotContextPlanTooltip", "Build an edit plan for this asset using the current prompt text in the UE5 Copilot tab."),
+        LOCTEXT("UE5CopilotContextPlanTooltip", "Build an edit plan for this asset using the current prompt text in the FitzAI tab."),
         FSlateIcon(),
         FUIAction(FExecuteAction::CreateRaw(this, &FUE5CopilotAssistantModule::RequestAssetEditPlanForSelection, AssetData))
     );
@@ -2085,13 +2127,13 @@ void FUE5CopilotAssistantModule::RequestAssetDetailsForSelection(FAssetData Asse
         StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAssetDetailsContext", "Inspecting the selected asset..."));
     }
 
-        EnsureBackendAndSendRequest(
-            BaseUrl + TEXT("/plugin/asset-details"),
-            UE5CopilotAssistant::BuildPluginAssetDetailsPayload(
-                AssetData.AssetName.ToString(),
-                TEXT("asset"),
-                AssetData.GetSoftObjectPath().ToString(),
-                AssetData.AssetClassPath.GetAssetName().ToString()
+    EnsureBackendAndSendRequest(
+        BaseUrl + TEXT("/plugin/asset-details"),
+        UE5CopilotAssistant::BuildPluginAssetDetailsPayload(
+            AssetData.AssetName.ToString(),
+            TEXT("asset"),
+            AssetData.GetSoftObjectPath().ToString(),
+            AssetData.AssetClassPath.GetAssetName().ToString()
         ),
         OutputTextBoxPtr,
         AgentSessionTextBoxPtr,
@@ -2125,7 +2167,7 @@ void FUE5CopilotAssistantModule::RequestAssetEditPlanForSelection(FAssetData Ass
     {
         if (StatusTextPtr.IsValid())
         {
-            StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingPromptAssetEditContext", "Type the requested asset change in the UE5 Copilot prompt box first."));
+            StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingPromptAssetEditContext", "Type the requested asset change in the FitzAI prompt box first."));
         }
         return;
     }
@@ -2139,14 +2181,14 @@ void FUE5CopilotAssistantModule::RequestAssetEditPlanForSelection(FAssetData Ass
         StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAssetEditContext", "Building an edit plan for the selected asset..."));
     }
 
-        EnsureBackendAndSendRequest(
-            BaseUrl + TEXT("/plugin/asset-edit-plan"),
-            UE5CopilotAssistant::BuildPluginAssetEditPlanPayload(
-                AssetData.AssetName.ToString(),
-                TEXT("asset"),
+    EnsureBackendAndSendRequest(
+        BaseUrl + TEXT("/plugin/asset-edit-plan"),
+        UE5CopilotAssistant::BuildPluginAssetEditPlanPayload(
+            AssetData.AssetName.ToString(),
+            TEXT("asset"),
             AssetData.GetSoftObjectPath().ToString(),
             AssetData.AssetClassPath.GetAssetName().ToString(),
-                ChangeRequest
+            ChangeRequest
         ),
         OutputTextBoxPtr,
         AgentSessionTextBoxPtr,
@@ -2222,11 +2264,12 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
 
                 + SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                .Padding(0.0f, 20.0f, 0.0f, 6.0f)
                 [
                     SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotHeader", "UE5 Copilot Assistant"))
-                    .Font(FAppStyle::GetFontStyle("HeadingExtraSmall"))
+                    .Text(LOCTEXT("UE5CopilotHeader", "Let's build"))
+                    .Font(FAppStyle::GetFontStyle("HeadingMedium"))
+                    .Justification(ETextJustify::Center)
                 ]
 
                 + SVerticalBox::Slot()
@@ -2234,7 +2277,8 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                 [
                     SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotIntro", "Connect the backend, then choose one path: ask a question, work with the selected asset, or plan a new asset."))
+                    .Text(LOCTEXT("UE5CopilotIntro", "FitzAI"))
+                    .Justification(ETextJustify::Center)
                     .AutoWrapText(true)
                 ]
 
@@ -2243,114 +2287,120 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                 .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                 [
                     SAssignNew(StatusTextPtr, STextBlock)
-                    .Text(LOCTEXT("UE5CopilotStatusDefault", "Step 1: confirm the backend URL. Step 2: use the question box or one of the guided asset actions below."))
+                    .Text(LOCTEXT("UE5CopilotStatusDefault", "Ask anything."))
+                    .Justification(ETextJustify::Center)
                     .AutoWrapText(true)
                 ]
 
                 + SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 4.0f)
+                .Padding(0.0f, 0.0f, 0.0f, 10.0f)
                 [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotBackendHeader", "Backend Connection"))
-                    .Font(FAppStyle::GetFontStyle("BoldFont"))
-                ]
+                    SNew(SHorizontalBox)
 
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotBackendHelp", "The plugin sends requests here for explanations, plans, and safe editor actions. If you provide a launch command below, it can start the backend for you."))
-                    .AutoWrapText(true)
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SAssignNew(BackendBaseUrlTextBoxPtr, SEditableTextBox)
-                    .Text(FText::FromString(CurrentBackendBaseUrl))
-                    .HintText(LOCTEXT("UE5CopilotBackendHint", "Backend URL, for example http://127.0.0.1:8000"))
-                    .OnTextChanged_Raw(this, &FUE5CopilotAssistantModule::HandleBackendBaseUrlChanged)
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SAssignNew(BackendLaunchCommandTextBoxPtr, SEditableTextBox)
-                    .Text(FText::FromString(BackendLaunchCommand))
-                    .HintText(LOCTEXT("UE5CopilotBackendLaunchHint", "Optional auto-start command, for example \"C:\\path\\to\\python.exe\" -m uvicorn app.main:app --host 127.0.0.1 --port 8000"))
-                    .OnTextChanged_Raw(this, &FUE5CopilotAssistantModule::HandleBackendLaunchCommandChanged)
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SNew(SButton)
-                    .Text(LOCTEXT("UE5CopilotStartBackend", "Start Backend"))
-                    .OnClicked_Lambda([this]()
-                    {
-                        FString LaunchError;
-                        if (!StartBackendProcess(LaunchError))
+                    + SHorizontalBox::Slot()
+                    .FillWidth(1.0f)
+                    .VAlign(VAlign_Center)
+                    [
+                        SNew(STextBlock)
+                        .Text_Lambda([this]()
                         {
-                            if (StatusTextPtr.IsValid())
+                            const FString DisplayUrl = CurrentBackendBaseUrl.IsEmpty() ? TEXT("http://127.0.0.1:8000") : CurrentBackendBaseUrl;
+                            return FText::FromString(FString::Printf(TEXT("Backend: %s"), *DisplayUrl));
+                        })
+                    ]
+
+                    + SHorizontalBox::Slot()
+                    .AutoWidth()
+                    .Padding(8.0f, 0.0f, 0.0f, 0.0f)
+                    [
+                        SNew(SButton)
+                        .Text(LOCTEXT("UE5CopilotConnectBackend", "Connect"))
+                        .OnClicked_Lambda([this]()
+                        {
+                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(
+                                BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : CurrentBackendBaseUrl
+                            );
+                            CurrentBackendBaseUrl = BaseUrl.IsEmpty() ? TEXT("http://127.0.0.1:8000") : BaseUrl;
+                            SaveSettings();
+
+                            EnsureBackendAvailable(
+                                [this]()
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotConnectBackendReady", "Connected. You can start chatting."));
+                                    }
+                                },
+                                StatusTextPtr
+                            );
+                            return FReply::Handled();
+                        })
+                    ]
+                ]
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 8.0f, 0.0f, 10.0f)
+                [
+                    SNew(SHorizontalBox)
+
+                    + SHorizontalBox::Slot()
+                    .FillWidth(1.0f)
+                    .Padding(0.0f, 0.0f, 6.0f, 0.0f)
+                    [
+                        SNew(SButton)
+                        .Text(LOCTEXT("UE5CopilotSuggestionOne", "Explain the selected Blueprint"))
+                        .OnClicked_Lambda([this]()
+                        {
+                            if (PromptTextBoxPtr.IsValid())
                             {
-                                StatusTextPtr->SetText(FText::FromString(LaunchError));
+                                PromptTextBoxPtr->SetText(LOCTEXT("UE5CopilotSuggestionOnePrompt", "Explain what the selected Blueprint does and point out any likely issues."));
                             }
                             return FReply::Handled();
-                        }
+                        })
+                    ]
 
-                        if (StatusTextPtr.IsValid())
+                    + SHorizontalBox::Slot()
+                    .FillWidth(1.0f)
+                    .Padding(3.0f, 0.0f, 3.0f, 0.0f)
+                    [
+                        SNew(SButton)
+                        .Text(LOCTEXT("UE5CopilotSuggestionTwo", "Plan a new gameplay feature"))
+                        .OnClicked_Lambda([this]()
                         {
-                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotBackendStartingManual", "Backend launch requested."));
-                        }
-                        return FReply::Handled();
-                    })
+                            if (PromptTextBoxPtr.IsValid())
+                            {
+                                PromptTextBoxPtr->SetText(LOCTEXT("UE5CopilotSuggestionTwoPrompt", "Create a step-by-step plan for a new gameplay feature in this project."));
+                            }
+                            return FReply::Handled();
+                        })
+                    ]
+
+                    + SHorizontalBox::Slot()
+                    .FillWidth(1.0f)
+                    .Padding(6.0f, 0.0f, 0.0f, 0.0f)
+                    [
+                        SNew(SButton)
+                        .Text(LOCTEXT("UE5CopilotSuggestionThree", "Help me change code"))
+                        .OnClicked_Lambda([this]()
+                        {
+                            if (PromptTextBoxPtr.IsValid())
+                            {
+                                PromptTextBoxPtr->SetText(LOCTEXT("UE5CopilotSuggestionThreePrompt", "Help me change the code for the selected gameplay system."));
+                            }
+                            return FReply::Handled();
+                        })
+                    ]
                 ]
 
                 + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SAssignNew(SelectionPreviewTextPtr, STextBlock)
-                    .Text(LOCTEXT("UE5CopilotSelectionDefault", "Current selection: none"))
-                ]
-
-                + SVerticalBox::Slot()
-                .FillHeight(0.20f)
+                .FillHeight(0.48f)
                 .Padding(0.0f, 0.0f, 0.0f, 8.0f)
                 [
-                    SAssignNew(PromptTextBoxPtr, SMultiLineEditableTextBox)
-                    .HintText(LOCTEXT("UE5CopilotPromptHint", "Ask a question here, or describe the change you want for the selected asset..."))
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
-                [
-                    SAssignNew(CodePatchTargetPathTextBoxPtr, SEditableTextBox)
-                    .HintText(LOCTEXT("UE5CopilotCodeTargetPathHint", "Optional code target path for Draft Code Diff, for example Source/MyGame/Public/Player/MyPlayerCharacter.h"))
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 4.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotAskHeader", "Chat With Copilot"))
-                    .Font(FAppStyle::GetFontStyle("BoldFont"))
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotAskHelp", "Type any question or task here. Use Send for normal chat, Start Agent Task for a live backend task session, Approve/Reject Agent Step plus Refresh/Resume Agent Task as that session advances, Draft Code Diff for a narrow C++ diff preview, Apply Selected Code File for bundle patches, or Summarize Selection for a selection-focused overview."))
-                    .AutoWrapText(true)
+                    SAssignNew(OutputTextBoxPtr, SMultiLineEditableTextBox)
+                    .IsReadOnly(true)
+                    .HintText(LOCTEXT("UE5CopilotOutputHint", "Replies show up here."))
                 ]
 
                 + SVerticalBox::Slot()
@@ -2362,6 +2412,18 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     + SHorizontalBox::Slot()
                     .FillWidth(1.0f)
                     .Padding(0.0f, 0.0f, 4.0f, 0.0f)
+                    [
+                        SNew(SBox)
+                        .MinDesiredHeight(72.0f)
+                        [
+                            SAssignNew(PromptTextBoxPtr, SMultiLineEditableTextBox)
+                            .HintText(LOCTEXT("UE5CopilotPromptHint", "Ask anything about your project, or describe the change you want..."))
+                        ]
+                    ]
+
+                    + SHorizontalBox::Slot()
+                    .AutoWidth()
+                    .VAlign(VAlign_Bottom)
                     [
                         SNew(SButton)
                         .Text(LOCTEXT("UE5CopilotSendAsk", "Send"))
@@ -2392,7 +2454,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
 
                             if (StatusTextPtr.IsValid())
                             {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAsk", "Sending chat request to backend..."));
+                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAsk", "Sending chat request..."));
                             }
 
                             EnsureBackendAndSendRequest(
@@ -2416,606 +2478,252 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                             return FReply::Handled();
                         })
                     ]
+                ]
 
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.0f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                [
+                    SNew(SExpandableArea)
+                    .InitiallyCollapsed(true)
+                    .AreaTitle(LOCTEXT("UE5CopilotMoreToolsHeader", "More Tools"))
+                    .BodyContent()
                     [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotPlanTask", "Start Agent Task"))
-                        .ToolTipText(LOCTEXT("UE5CopilotPlanTaskTooltip", "Start a multi-step backend agent session for a broader goal that may span code, assets, confirmation, and follow-up planning."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                            const FString Prompt = PromptTextBoxPtr.IsValid() ? PromptTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
-                            const FString TargetPath = CodePatchTargetPathTextBoxPtr.IsValid() ? CodePatchTargetPathTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
-                            if (BaseUrl.IsEmpty() || Prompt.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingTaskPlanInput", "Enter a backend URL and a broader task prompt first."));
-                                }
-                                return FReply::Handled();
-                            }
-                            CurrentBackendBaseUrl = BaseUrl;
+                        SNew(SVerticalBox)
 
-                            FString SelectionName, SelectionType, AssetPath, ClassName;
-                            const bool bHasSelection = UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName);
-                            if (SelectionPreviewTextPtr.IsValid())
-                            {
-                                SelectionPreviewTextPtr->SetText(
-                                    bHasSelection
-                                        ? FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType))
-                                        : LOCTEXT("UE5CopilotSelectionNone", "Current selection: none")
-                                );
-                            }
-
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingTaskPlan", "Starting backend agent session..."));
-                            }
-
-                            EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/agent-session"),
-                                UE5CopilotAssistant::BuildAgentTaskPayload(Prompt),
-                                OutputTextBoxPtr,
-                                AgentSessionTextBoxPtr,
-                                CodeDiffPreviewTextBoxPtr,
-                                EditorActionPreviewTextBoxPtr,
-                                BundleApplyTargetPathTextBoxPtr,
-                                &PendingEditorActionJson,
-                                StatusTextPtr
-                            );
-                            return FReply::Handled();
-                        })
-                    ]
-
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.0f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotRejectAgentStep", "Reject Agent Step"))
-                        .ToolTipText(LOCTEXT("UE5CopilotRejectAgentStepTooltip", "Reject the current pending agent confirmation so the session can stop cleanly."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                            if (BaseUrl.IsEmpty() || CurrentAgentTaskId.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingAgentRejectState", "Start an agent session first so there is a task to reject."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotRejectingAgentStep", "Rejecting pending agent step..."));
-                            }
-
-                            EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/agent-session/") + CurrentAgentTaskId + TEXT("/confirm"),
-                                UE5CopilotAssistant::BuildAgentDecisionPayload(TEXT("reject")),
-                                OutputTextBoxPtr,
-                                AgentSessionTextBoxPtr,
-                                CodeDiffPreviewTextBoxPtr,
-                                EditorActionPreviewTextBoxPtr,
-                                BundleApplyTargetPathTextBoxPtr,
-                                &PendingEditorActionJson,
-                                StatusTextPtr
-                            );
-                            return FReply::Handled();
-                        })
-                    ]
-
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.0f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotApproveAgentStep", "Approve Agent Step"))
-                        .ToolTipText(LOCTEXT("UE5CopilotApproveAgentStepTooltip", "Approve the current pending agent confirmation so the session can continue."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                            if (BaseUrl.IsEmpty() || CurrentAgentTaskId.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingAgentApprovalState", "Start an agent session first so there is a task to approve."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotApprovingAgentStep", "Approving pending agent step..."));
-                            }
-
-                            EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/agent-session/") + CurrentAgentTaskId + TEXT("/confirm"),
-                                UE5CopilotAssistant::BuildAgentDecisionPayload(TEXT("approve")),
-                                OutputTextBoxPtr,
-                                AgentSessionTextBoxPtr,
-                                CodeDiffPreviewTextBoxPtr,
-                                EditorActionPreviewTextBoxPtr,
-                                BundleApplyTargetPathTextBoxPtr,
-                                &PendingEditorActionJson,
-                                StatusTextPtr
-                            );
-                            return FReply::Handled();
-                        })
-                    ]
-
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.0f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotRefreshAgentTask", "Refresh Agent Status"))
-                        .ToolTipText(LOCTEXT("UE5CopilotRefreshAgentTaskTooltip", "Fetch the latest backend state for the current live agent session."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                            if (BaseUrl.IsEmpty() || CurrentAgentTaskId.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingAgentRefreshState", "Start an agent session first so there is a task to refresh."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotRefreshingAgentTask", "Refreshing agent task status..."));
-                            }
-
-                            EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/agent-session/") + CurrentAgentTaskId + TEXT("/status"),
-                                TEXT("{}"),
-                                OutputTextBoxPtr,
-                                AgentSessionTextBoxPtr,
-                                CodeDiffPreviewTextBoxPtr,
-                                EditorActionPreviewTextBoxPtr,
-                                BundleApplyTargetPathTextBoxPtr,
-                                &PendingEditorActionJson,
-                                StatusTextPtr
-                            );
-                            return FReply::Handled();
-                        })
-                    ]
-
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.0f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotResumeAgentTask", "Resume Agent Task"))
-                        .ToolTipText(LOCTEXT("UE5CopilotResumeAgentTaskTooltip", "Resume the approved agent session so it can continue with follow-up backend tools."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                            if (BaseUrl.IsEmpty() || CurrentAgentTaskId.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingAgentResumeState", "Start and approve an agent session first so there is a task to resume."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotResumingAgentTask", "Resuming approved agent session..."));
-                            }
-
-                            EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/agent-session/") + CurrentAgentTaskId + TEXT("/resume"),
-                                TEXT("{}"),
-                                OutputTextBoxPtr,
-                                AgentSessionTextBoxPtr,
-                                CodeDiffPreviewTextBoxPtr,
-                                EditorActionPreviewTextBoxPtr,
-                                BundleApplyTargetPathTextBoxPtr,
-                                &PendingEditorActionJson,
-                                StatusTextPtr
-                            );
-                            return FReply::Handled();
-                        })
-                    ]
-
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.1f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SAssignNew(BundleApplyTargetComboBoxPtr, SComboBox<TSharedPtr<FString>>)
-                        .OptionsSource(&PendingCodePatchBundleTargets)
-                        .InitiallySelectedItem(SelectedPendingCodePatchBundleTarget)
-                        .OnGenerateWidget_Lambda([](TSharedPtr<FString> Item)
-                        {
-                            return SNew(STextBlock).Text(FText::FromString(Item.IsValid() ? *Item : TEXT("")));
-                        })
-                        .OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewValue, ESelectInfo::Type)
-                        {
-                            SelectedPendingCodePatchBundleTarget = NewValue;
-                            if (BundleApplyTargetPathTextBoxPtr.IsValid())
-                            {
-                                BundleApplyTargetPathTextBoxPtr->SetText(FText::FromString(NewValue.IsValid() ? *NewValue : FString()));
-                            }
-                        })
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                         [
                             SNew(STextBlock)
-                            .Text_Lambda([this]()
-                            {
-                                return FText::FromString(
-                                    SelectedPendingCodePatchBundleTarget.IsValid()
-                                        ? *SelectedPendingCodePatchBundleTarget
-                                        : (PendingCodePatchBundleTargets.Num() > 0 ? TEXT("Choose a pending bundle file") : TEXT("No pending bundle files"))
-                                );
-                            })
+                            .Text(LOCTEXT("UE5CopilotMoreToolsHelp", "Power tools for setup, selected assets, previews, and advanced workflows."))
+                            .AutoWrapText(true)
                         ]
-                    ]
 
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.1f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SAssignNew(BundleApplyTargetPathTextBoxPtr, SEditableTextBox)
-                        .HintText(LOCTEXT("UE5CopilotBundleApplyTargetPathHint", "Optional override for the selected bundle file path"))
-                    ]
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                        [
+                            SNew(SExpandableArea)
+                            .InitiallyCollapsed(true)
+                            .AreaTitle(LOCTEXT("UE5CopilotBackendHeader", "Setup"))
+                            .BodyContent()
+                            [
+                                SNew(SVerticalBox)
 
-                    + SHorizontalBox::Slot()
-                    .AutoWidth()
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotApplySelectedCodeFile", "Apply Selected Code File"))
-                        .ToolTipText(LOCTEXT("UE5CopilotApplySelectedCodeFileTooltip", "Apply just one file from the currently previewed code patch bundle. Use the picker or enter an override path first."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            if (PendingEditorActionJson.IsEmpty())
+                                + SVerticalBox::Slot()
+                                .AutoHeight()
+                                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                                [
+                                    SNew(STextBlock)
+                                    .Text(LOCTEXT("UE5CopilotBackendHelp", "Use this only when you need to change the backend URL or launch command."))
+                                    .AutoWrapText(true)
+                                ]
+
+                                + SVerticalBox::Slot()
+                                .AutoHeight()
+                                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                                [
+                                    SAssignNew(BackendBaseUrlTextBoxPtr, SEditableTextBox)
+                                    .Text(FText::FromString(CurrentBackendBaseUrl))
+                                    .HintText(LOCTEXT("UE5CopilotBackendHint", "Backend URL, for example http://127.0.0.1:8000"))
+                                    .OnTextChanged_Raw(this, &FUE5CopilotAssistantModule::HandleBackendBaseUrlChanged)
+                                ]
+
+                                + SVerticalBox::Slot()
+                                .AutoHeight()
+                                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                                [
+                                    SAssignNew(BackendLaunchCommandTextBoxPtr, SEditableTextBox)
+                                    .Text(FText::FromString(BackendLaunchCommand))
+                                    .HintText(LOCTEXT("UE5CopilotBackendLaunchHint", "Optional auto-start command, for example \"C:\\path\\to\\python.exe\" -m uvicorn app.main:app --host 127.0.0.1 --port 8000"))
+                                    .OnTextChanged_Raw(this, &FUE5CopilotAssistantModule::HandleBackendLaunchCommandChanged)
+                                ]
+
+                                + SVerticalBox::Slot()
+                                .AutoHeight()
+                                [
+                                    SNew(SButton)
+                                    .Text(LOCTEXT("UE5CopilotStartBackend", "Start Backend"))
+                                    .OnClicked_Lambda([this]()
+                                    {
+                                        FString LaunchError;
+                                        if (!StartBackendProcess(LaunchError))
+                                        {
+                                            if (StatusTextPtr.IsValid())
+                                            {
+                                                StatusTextPtr->SetText(FText::FromString(LaunchError));
+                                            }
+                                            return FReply::Handled();
+                                        }
+
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotBackendStartingManual", "Backend launch requested."));
+                                        }
+                                        return FReply::Handled();
+                                    })
+                                ]
+                            ]
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                        [
+                            SNew(SExpandableArea)
+                            .InitiallyCollapsed(false)
+                            .AreaTitle(LOCTEXT("UE5CopilotSelectionToolsHeader", "Selected Asset And Workflow"))
+                            .BodyContent()
+                            [
+                                SNew(SVerticalBox)
+
+                                + SVerticalBox::Slot()
+                                .AutoHeight()
+                                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                                [
+                                    SNew(STextBlock)
+                                    .Text(LOCTEXT("UE5CopilotSelectionToolsHelp", "Use these when you want to inspect the current selection, plan a change, or force workflow mode."))
+                                    .AutoWrapText(true)
+                                ]
+
+                                + SVerticalBox::Slot()
+                                .AutoHeight()
+                                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                                [
+                            SAssignNew(SelectionPreviewTextPtr, STextBlock)
+                            .Text(LOCTEXT("UE5CopilotSelectionDefault", "Current selection: none"))
+                                ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                        [
+                            SAssignNew(CodePatchTargetPathTextBoxPtr, SEditableTextBox)
+                            .HintText(LOCTEXT("UE5CopilotCodeTargetPathHint", "Optional code target path, for example Source/MyGame/Public/Player/MyPlayerCharacter.h"))
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                        [
+                            SNew(SButton)
+                            .Text(LOCTEXT("UE5CopilotPlanTask", "Force Agent Workflow"))
+                            .ToolTipText(LOCTEXT("UE5CopilotPlanTaskTooltip", "Start a multi-step backend agent session immediately for this prompt."))
+                            .OnClicked_Lambda([this]()
                             {
-                                if (StatusTextPtr.IsValid())
+                                const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                                const FString Prompt = PromptTextBoxPtr.IsValid() ? PromptTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                const FString TargetPath = CodePatchTargetPathTextBoxPtr.IsValid() ? CodePatchTargetPathTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                if (BaseUrl.IsEmpty() || Prompt.IsEmpty())
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotNoPendingSelectedCodeFileAction", "There is no previewed code patch bundle to apply from."));
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingTaskPlanInput", "Enter a backend URL and a broader task prompt first."));
+                                    }
+                                    return FReply::Handled();
                                 }
-                                return FReply::Handled();
-                            }
+                                CurrentBackendBaseUrl = BaseUrl;
 
-                            TSharedPtr<FJsonObject> EditorActionObject;
-                            const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(PendingEditorActionJson);
-                            if (!FJsonSerializer::Deserialize(Reader, EditorActionObject) || !EditorActionObject.IsValid())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotInvalidSelectedCodeFileAction", "The previewed editor action could not be parsed."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            FString ActionType;
-                            if (!EditorActionObject->TryGetStringField(TEXT("action_type"), ActionType) || ActionType != TEXT("apply_code_patch_bundle_preview"))
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotSelectedCodeFileNeedsBundleAction", "Apply Selected Code File only works when the pending preview is a code patch bundle."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            const TSharedPtr<FJsonObject>* ArgumentsObject = nullptr;
-                            const TArray<TSharedPtr<FJsonValue>>* FileEntries = nullptr;
-                            if (!EditorActionObject->TryGetObjectField(TEXT("arguments"), ArgumentsObject) || !ArgumentsObject || !ArgumentsObject->IsValid()
-                                || !(*ArgumentsObject)->TryGetArrayField(TEXT("files"), FileEntries) || !FileEntries || FileEntries->Num() == 0)
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotSelectedCodeFileMissingEntries", "The previewed code patch bundle is missing its file entries."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            FString RequestedTargetPath = SelectedPendingCodePatchBundleTarget.IsValid()
-                                ? SelectedPendingCodePatchBundleTarget->TrimStartAndEnd()
-                                : FString();
-                            const FString ManualOverrideTargetPath = BundleApplyTargetPathTextBoxPtr.IsValid()
-                                ? BundleApplyTargetPathTextBoxPtr->GetText().ToString().TrimStartAndEnd()
-                                : FString();
-                            if (!ManualOverrideTargetPath.IsEmpty())
-                            {
-                                RequestedTargetPath = ManualOverrideTargetPath;
-                            }
-                            if (RequestedTargetPath.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotSelectedCodeFilePathRequired", "Choose a pending bundle file or enter an override path first."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            const int32 SelectedEntryIndex = UE5CopilotAssistant::FindCodePatchBundleEntryIndex(*FileEntries, RequestedTargetPath);
-                            if (SelectedEntryIndex == INDEX_NONE)
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(FText::FromString(FString::Printf(TEXT("`%s` was not found in the current code patch bundle preview."), *RequestedTargetPath)));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            const TSharedPtr<FJsonObject> SelectedEntryObject = (*FileEntries)[SelectedEntryIndex].IsValid() ? (*FileEntries)[SelectedEntryIndex]->AsObject() : nullptr;
-                            if (!SelectedEntryObject.IsValid())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotSelectedCodeFileInvalidEntry", "The selected bundle file entry is invalid."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            FString TargetPath;
-                            FString EditKind;
-                            FString OriginalContentHash;
-                            FString UpdatedContent;
-                            SelectedEntryObject->TryGetStringField(TEXT("target_path"), TargetPath);
-                            SelectedEntryObject->TryGetStringField(TEXT("edit_kind"), EditKind);
-                            SelectedEntryObject->TryGetStringField(TEXT("original_content_hash"), OriginalContentHash);
-                            SelectedEntryObject->TryGetStringField(TEXT("updated_content"), UpdatedContent);
-                            if (TargetPath.IsEmpty() || EditKind.IsEmpty() || OriginalContentHash.IsEmpty() || UpdatedContent.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotSelectedCodeFileIncompleteEntry", "The selected bundle file entry is missing required code patch fields."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            const EAppReturnType::Type ConfirmSelectedCodePatchResult = FMessageDialog::Open(
-                                EAppMsgType::OkCancel,
-                                FText::FromString(FString::Printf(
-                                    TEXT("Apply one previewed code patch file\n\nFile: %s\nEdit Kind: %s\nRemaining Files After Apply: %d\n\nThis will overwrite only the selected file inside the current Unreal project and keep the rest of the bundle pending."),
-                                    *TargetPath,
-                                    *EditKind,
-                                    FileEntries->Num() - 1))
-                            );
-                            if (ConfirmSelectedCodePatchResult != EAppReturnType::Ok)
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotSelectedCodeFileCancelled", "Single-file code patch apply cancelled."));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            FString CodePatchError;
-                            const bool bCodePatchSucceeded = UE5CopilotAssistant::ApplyPreviewCodePatch(TargetPath, EditKind, OriginalContentHash, UpdatedContent, CodePatchError);
-                            if (!bCodePatchSucceeded)
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(FText::FromString(CodePatchError.IsEmpty() ? TEXT("Single-file code patch execution failed.") : CodePatchError));
-                                }
-                                return FReply::Handled();
-                            }
-
-                            TArray<TSharedPtr<FJsonValue>> RemainingEntries = *FileEntries;
-                            RemainingEntries.RemoveAt(SelectedEntryIndex);
-                            PendingEditorActionJson = UE5CopilotAssistant::BuildCodePatchBundleActionJson(RemainingEntries);
-
-                                if (CodeDiffPreviewTextBoxPtr.IsValid())
-                                {
-                                    CodeDiffPreviewTextBoxPtr->SetText(FText::FromString(UE5CopilotAssistant::BuildCodePatchBundleDiffPreview(RemainingEntries)));
-                                }
-                                if (EditorActionPreviewTextBoxPtr.IsValid())
-                            {
-                                EditorActionPreviewTextBoxPtr->SetText(FText::FromString(
-                                    RemainingEntries.Num() > 0
-                                        ? UE5CopilotAssistant::BuildEditorActionPreviewFromSerializedAction(PendingEditorActionJson)
-                                        : TEXT("No editor action proposed yet.")));
-                            }
-                            RefreshPendingCodePatchBundleTargets(UE5CopilotAssistant::ExtractCodePatchBundleTargetPaths(RemainingEntries));
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(FText::FromString(
-                                    RemainingEntries.Num() > 0
-                                        ? FString::Printf(TEXT("Applied `%s`. %d previewed bundle file(s) remain pending."), *TargetPath, RemainingEntries.Num())
-                                        : FString::Printf(TEXT("Applied `%s`. No previewed bundle files remain pending."), *TargetPath)));
-                            }
-                            return FReply::Handled();
-                        })
-                    ]
-
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.0f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotPlanCodePatch", "Draft Code Diff"))
-                        .ToolTipText(LOCTEXT("UE5CopilotPlanCodePatchTooltip", "Build a preview-only single-file C++ diff before any code apply step exists."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                            const FString Prompt = PromptTextBoxPtr.IsValid() ? PromptTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
-                            if (BaseUrl.IsEmpty() || Prompt.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingCodePatchInput", "Enter a backend URL and a narrow code-change prompt first."));
-                                }
-                                return FReply::Handled();
-                            }
-                            CurrentBackendBaseUrl = BaseUrl;
-
-                            FString SelectionName, SelectionType, AssetPath, ClassName;
-                            const bool bHasSelection = UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName);
-                            if (SelectionPreviewTextPtr.IsValid())
-                            {
-                                SelectionPreviewTextPtr->SetText(
-                                    bHasSelection
-                                        ? FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType))
-                                        : LOCTEXT("UE5CopilotSelectionNone", "Current selection: none")
-                                );
-                            }
-
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingCodePatchPlan", "Building a preview-only code diff..."));
-                            }
-
-                            EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/code-patch-bundle-draft"),
-                                UE5CopilotAssistant::BuildCodePatchPlanPayload(Prompt, TargetPath),
-                                OutputTextBoxPtr,
-                                AgentSessionTextBoxPtr,
-                                CodeDiffPreviewTextBoxPtr,
-                                EditorActionPreviewTextBoxPtr,
-                                BundleApplyTargetPathTextBoxPtr,
-                                &PendingEditorActionJson,
-                                StatusTextPtr
-                            );
-                            return FReply::Handled();
-                        })
-                    ]
-
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.0f)
-                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
-                    [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotSendSelection", "Summarize Selection"))
-                        .ToolTipText(LOCTEXT("UE5CopilotSendSelectionTooltip", "Get a general summary of the currently selected actor or asset."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                            if (BaseUrl.IsEmpty())
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingBaseUrl", "Enter a backend base URL first."));
-                                }
-                                return FReply::Handled();
-                            }
-                            CurrentBackendBaseUrl = BaseUrl;
-
-                            FString SelectionName, SelectionType, AssetPath, ClassName;
-                            if (!UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName))
-                            {
-                                if (StatusTextPtr.IsValid())
-                                {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusNoSelection", "No actor or asset is currently selected in the editor."));
-                                }
+                                FString SelectionName, SelectionType, AssetPath, ClassName;
+                                const bool bHasSelection = UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName);
                                 if (SelectionPreviewTextPtr.IsValid())
                                 {
-                                    SelectionPreviewTextPtr->SetText(LOCTEXT("UE5CopilotSelectionNone", "Current selection: none"));
+                                    SelectionPreviewTextPtr->SetText(
+                                        bHasSelection
+                                            ? FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType))
+                                            : LOCTEXT("UE5CopilotSelectionNone", "Current selection: none")
+                                    );
                                 }
-                                return FReply::Handled();
-                            }
 
-                            if (SelectionPreviewTextPtr.IsValid())
-                            {
-                                SelectionPreviewTextPtr->SetText(FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType)));
-                            }
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingSelection", "Sending current editor selection to backend..."));
-                            }
-
-                            EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/plugin/selection-context"),
-                                UE5CopilotAssistant::BuildSelectionPayload(SelectionName, SelectionType, AssetPath, ClassName),
-                                OutputTextBoxPtr,
-                                AgentSessionTextBoxPtr,
-                                CodeDiffPreviewTextBoxPtr,
-                                EditorActionPreviewTextBoxPtr,
-                                BundleApplyTargetPathTextBoxPtr,
-                                &PendingEditorActionJson,
-                                StatusTextPtr
-                            );
-                            return FReply::Handled();
-                        })
-                    ]
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 4.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotSelectionWorkflowHeader", "Optional Shortcuts"))
-                    .Font(FAppStyle::GetFontStyle("BoldFont"))
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotSelectionWorkflowHelp", "These buttons are still here when you want to force a specific workflow instead of letting chat decide for you."))
-                    .AutoWrapText(true)
-                ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 8.0f)
-                [
-                    SNew(SHorizontalBox)
-
-                    + SHorizontalBox::Slot()
-                    .FillWidth(1.0f)
-                    .Padding(0.0f, 0.0f, 4.0f, 0.0f)
-                    [
-                        SNew(SButton)
-                        .Text(LOCTEXT("UE5CopilotExplainAsset", "Inspect Selected Asset"))
-                        .ToolTipText(LOCTEXT("UE5CopilotExplainAssetTooltip", "Inspect the selected asset with asset-specific context."))
-                        .OnClicked_Lambda([this]()
-                        {
-                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
-                            if (BaseUrl.IsEmpty())
-                            {
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingBaseUrlAssetDetails", "Enter a backend base URL first."));
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingTaskPlan", "Forcing backend agent workflow mode..."));
                                 }
-                                return FReply::Handled();
-                            }
-                            CurrentBackendBaseUrl = BaseUrl;
 
-                            FString SelectionName, SelectionType, AssetPath, ClassName;
-                            if (!UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName))
-                            {
-                                if (StatusTextPtr.IsValid())
+                                EnsureBackendAndSendRequest(
+                                    BaseUrl + TEXT("/agent-session"),
+                                    UE5CopilotAssistant::BuildAgentTaskPayload(Prompt),
+                                    OutputTextBoxPtr,
+                                    AgentSessionTextBoxPtr,
+                                    CodeDiffPreviewTextBoxPtr,
+                                    EditorActionPreviewTextBoxPtr,
+                                    BundleApplyTargetPathTextBoxPtr,
+                                    &PendingEditorActionJson,
+                                    StatusTextPtr
+                                );
+                                return FReply::Handled();
+                            })
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 4.0f)
+                        [
+                            SNew(STextBlock)
+                            .Text(LOCTEXT("UE5CopilotSelectionWorkflowHeader", "Quick Actions"))
+                            .Font(FAppStyle::GetFontStyle("BoldFont"))
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                        [
+                            SNew(SHorizontalBox)
+
+                            + SHorizontalBox::Slot()
+                            .FillWidth(1.0f)
+                            .Padding(0.0f, 0.0f, 4.0f, 0.0f)
+                            [
+                                SNew(SButton)
+                                .Text(LOCTEXT("UE5CopilotExplainAsset", "Inspect Selected Asset"))
+                                .ToolTipText(LOCTEXT("UE5CopilotExplainAssetTooltip", "Inspect the selected asset with asset-specific context."))
+                                .OnClicked_Lambda([this]()
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusNoSelectionAssetDetails", "Select an asset before using the asset inspector."));
-                                }
-                                return FReply::Handled();
-                            }
+                                    const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                                    if (BaseUrl.IsEmpty())
+                                    {
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingBaseUrlAssetDetails", "Enter a backend base URL first."));
+                                        }
+                                        return FReply::Handled();
+                                    }
+                                    CurrentBackendBaseUrl = BaseUrl;
 
-                            if (SelectionPreviewTextPtr.IsValid())
-                            {
-                                SelectionPreviewTextPtr->SetText(FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType)));
-                            }
-                            if (StatusTextPtr.IsValid())
-                            {
-                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAssetDetails", "Inspecting the selected asset..."));
-                            }
+                                    FString SelectionName, SelectionType, AssetPath, ClassName;
+                                    if (!UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName))
+                                    {
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusNoSelectionAssetDetails", "Select an asset before using the asset inspector."));
+                                        }
+                                        return FReply::Handled();
+                                    }
 
-                            EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/plugin/asset-details"),
-                                UE5CopilotAssistant::BuildPluginAssetDetailsPayload(SelectionName, SelectionType, AssetPath, ClassName),
-                                OutputTextBoxPtr,
-                                AgentSessionTextBoxPtr,
-                                CodeDiffPreviewTextBoxPtr,
-                                EditorActionPreviewTextBoxPtr,
-                                BundleApplyTargetPathTextBoxPtr,
-                                &PendingEditorActionJson,
-                                StatusTextPtr
-                            );
-                            return FReply::Handled();
-                        })
-                    ]
+                                    if (SelectionPreviewTextPtr.IsValid())
+                                    {
+                                        SelectionPreviewTextPtr->SetText(FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType)));
+                                    }
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSendingAssetDetails", "Inspecting the selected asset..."));
+                                    }
+
+                                    EnsureBackendAndSendRequest(
+                                        BaseUrl + TEXT("/plugin/asset-details"),
+                                        UE5CopilotAssistant::BuildPluginAssetDetailsPayload(SelectionName, SelectionType, AssetPath, ClassName),
+                                        OutputTextBoxPtr,
+                                        AgentSessionTextBoxPtr,
+                                        CodeDiffPreviewTextBoxPtr,
+                                        EditorActionPreviewTextBoxPtr,
+                                        BundleApplyTargetPathTextBoxPtr,
+                                        &PendingEditorActionJson,
+                                        StatusTextPtr
+                                    );
+                                    return FReply::Handled();
+                                })
+                            ]
 
                     + SHorizontalBox::Slot()
                     .FillWidth(1.0f)
@@ -3081,29 +2789,33 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     ]
                 ]
 
+                                ]
+                            ]
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 4.0f)
                 [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotScaffoldHeader", "Plan A New Asset"))
-                    .Font(FAppStyle::GetFontStyle("BoldFont"))
-                ]
+                    SNew(SExpandableArea)
+                    .InitiallyCollapsed(true)
+                    .AreaTitle(LOCTEXT("UE5CopilotScaffoldHeader", "Create New Asset"))
+                    .BodyContent()
+                    [
+                        SNew(SVerticalBox)
 
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotScaffoldHelp", "Use this section when you want a plan for creating a brand-new asset."))
-                    .AutoWrapText(true)
-                ]
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(STextBlock)
+                            .Text(LOCTEXT("UE5CopilotScaffoldHelp", "Build a starter plan for a brand-new asset."))
+                            .AutoWrapText(true)
+                        ]
 
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SNew(SComboBox<TSharedPtr<FString>>)
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(SComboBox<TSharedPtr<FString>>)
                     .OptionsSource(&AssetScaffoldKinds)
                     .InitiallySelectedItem(SelectedAssetScaffoldKind)
                     .OnGenerateWidget_Lambda([](TSharedPtr<FString> Item)
@@ -3124,7 +2836,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                             return FText::FromString(SelectedAssetScaffoldKind.IsValid() ? *SelectedAssetScaffoldKind : TEXT("blueprint_class"));
                         })
                     ]
-                ]
+                        ]
 
                 + SVerticalBox::Slot()
                 .AutoHeight()
@@ -3204,30 +2916,33 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                         return FReply::Handled();
                     })
                 ]
-
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotAdvancedHeader", "Advanced Tools"))
-                    .Font(FAppStyle::GetFontStyle("BoldFont"))
+                        ]
                 ]
-
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                 [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotAdvancedHelp", "These controls are more technical. Use them when you want to apply a previewed editor action or send deeper exported asset data."))
-                    .AutoWrapText(true)
-                ]
+                    SNew(SExpandableArea)
+                    .InitiallyCollapsed(true)
+                    .AreaTitle(LOCTEXT("UE5CopilotAdvancedHeader", "Execution And Deep Analysis"))
+                    .BodyContent()
+                    [
+                        SNew(SVerticalBox)
 
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SNew(SHorizontalBox)
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(STextBlock)
+                            .Text(LOCTEXT("UE5CopilotAdvancedHelp", "Technical tools for applying previewed actions or sending detailed exported asset data."))
+                            .AutoWrapText(true)
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(SHorizontalBox)
 
                     + SHorizontalBox::Slot()
                     .FillWidth(1.0f)
@@ -3877,71 +3592,97 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                         return FReply::Handled();
                     })
                 ]
-
-                + SVerticalBox::Slot()
-                .FillHeight(0.60f)
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SAssignNew(OutputTextBoxPtr, SMultiLineEditableTextBox)
-                    .IsReadOnly(true)
-                    .HintText(LOCTEXT("UE5CopilotOutputHint", "Chat responses, explanations, and plans will appear here."))
-                ]
-
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                 [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotAgentSessionHeader", "Agent Session"))
-                    .Font(FAppStyle::GetFontStyle("BoldFont"))
-                ]
+                    SNew(SExpandableArea)
+                    .InitiallyCollapsed(true)
+                    .AreaTitle(LOCTEXT("UE5CopilotPreviewGroupHeader", "Session And Previews"))
+                    .BodyContent()
+                    [
+                        SNew(SVerticalBox)
 
-                + SVerticalBox::Slot()
-                .FillHeight(0.20f)
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SAssignNew(AgentSessionTextBoxPtr, SMultiLineEditableTextBox)
-                    .IsReadOnly(true)
-                    .Text(LOCTEXT("UE5CopilotAgentSessionDefault", "No live agent session yet."))
-                    .HintText(LOCTEXT("UE5CopilotAgentSessionHint", "Live agent-task state, next actions, and pending confirmations appear here."))
-                ]
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(STextBlock)
+                            .Text(LOCTEXT("UE5CopilotPreviewGroupHelp", "See the current agent session, code diff drafts, and previewed editor actions here."))
+                            .AutoWrapText(true)
+                        ]
 
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotCodeDiffPreviewHeader", "Code Diff Preview"))
-                    .Font(FAppStyle::GetFontStyle("BoldFont"))
-                ]
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(STextBlock)
+                            .Text(LOCTEXT("UE5CopilotAgentSessionHeader", "Agent Session"))
+                            .Font(FAppStyle::GetFontStyle("BoldFont"))
+                        ]
 
-                + SVerticalBox::Slot()
-                .FillHeight(0.28f)
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SAssignNew(CodeDiffPreviewTextBoxPtr, SMultiLineEditableTextBox)
-                    .IsReadOnly(true)
-                    .HintText(LOCTEXT("UE5CopilotCodeDiffPreviewHint", "Previewed unified diffs appear here for narrow code patch drafts."))
-                ]
+                        + SVerticalBox::Slot()
+                        .FillHeight(0.20f)
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SAssignNew(AgentSessionTextBoxPtr, SMultiLineEditableTextBox)
+                            .IsReadOnly(true)
+                            .Text(LOCTEXT("UE5CopilotAgentSessionDefault", "No live agent session yet."))
+                            .HintText(LOCTEXT("UE5CopilotAgentSessionHint", "Live agent-task state, next actions, and pending confirmations appear here."))
+                        ]
 
-                + SVerticalBox::Slot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 6.0f)
-                [
-                    SNew(STextBlock)
-                    .Text(LOCTEXT("UE5CopilotEditorActionPreviewHeader", "Editor Action Preview"))
-                    .Font(FAppStyle::GetFontStyle("BoldFont"))
-                ]
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(STextBlock)
+                            .Text(LOCTEXT("UE5CopilotCodeDiffPreviewHeader", "Code Diff Preview"))
+                            .Font(FAppStyle::GetFontStyle("BoldFont"))
+                        ]
 
-                + SVerticalBox::Slot()
-                .FillHeight(0.22f)
-                [
-                    SAssignNew(EditorActionPreviewTextBoxPtr, SMultiLineEditableTextBox)
-                    .IsReadOnly(true)
-                    .HintText(LOCTEXT("UE5CopilotEditorActionPreviewHint", "Previewed editor actions appear here before you decide whether to apply them."))
+                        + SVerticalBox::Slot()
+                        .FillHeight(0.28f)
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SAssignNew(CodeDiffPreviewTextBoxPtr, SMultiLineEditableTextBox)
+                            .IsReadOnly(true)
+                            .HintText(LOCTEXT("UE5CopilotCodeDiffPreviewHint", "Previewed unified diffs appear here for narrow code patch drafts."))
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(STextBlock)
+                            .Text(LOCTEXT("UE5CopilotEditorActionPreviewHeader", "Editor Action Preview"))
+                            .Font(FAppStyle::GetFontStyle("BoldFont"))
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .FillHeight(0.22f)
+                        [
+                            SAssignNew(EditorActionPreviewTextBoxPtr, SMultiLineEditableTextBox)
+                            .IsReadOnly(true)
+                            .HintText(LOCTEXT("UE5CopilotEditorActionPreviewHint", "Previewed editor actions appear here before you decide whether to apply them."))
+                        ]
+                    ]
+                ]
+                ]
                 ]
             ]
-        ];
+        ]
+    ]
+];
+}
+
+void FUE5CopilotAssistantModule::SetCurrentAgentTaskId(const FString& TaskId)
+{
+    CurrentAgentTaskId = TaskId;
+}
+
+void FUE5CopilotAssistantModule::ClearCurrentAgentTaskId()
+{
+    CurrentAgentTaskId.Reset();
 }
 
 #undef LOCTEXT_NAMESPACE

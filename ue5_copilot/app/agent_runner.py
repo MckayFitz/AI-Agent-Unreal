@@ -80,6 +80,17 @@ def resume_agent_task_session(session: dict[str, Any]) -> dict[str, Any]:
     return run_agent_session_loop(session)
 
 
+def confirm_and_continue_agent_task_session(session: dict[str, Any], *, decision: str) -> dict[str, Any]:
+    updated_session = confirm_agent_task_session(session, decision=decision)
+    if updated_session.get("error"):
+        return updated_session
+
+    if (decision or "").strip().lower() != "approve":
+        return updated_session
+
+    return resume_agent_task_session(updated_session)
+
+
 def build_initial_session(
     *,
     goal: str,

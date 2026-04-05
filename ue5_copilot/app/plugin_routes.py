@@ -27,6 +27,7 @@ class PluginSelectionRequest(BaseModel):
     asset_path: str | None = None
     class_name: str | None = None
     change_request: str | None = None
+    project_path: str | None = None
     source: str | None = None
 
 
@@ -37,6 +38,7 @@ class PluginChatRequest(BaseModel):
     asset_path: str | None = None
     class_name: str | None = None
     exported_text: str | None = None
+    project_path: str | None = None
     source: str | None = None
 
 
@@ -46,6 +48,7 @@ class DeepAssetAnalysisRequest(BaseModel):
     selection_name: str | None = None
     class_name: str | None = None
     asset_path: str | None = None
+    project_path: str | None = None
     source: str | None = None
 
 
@@ -93,6 +96,25 @@ SCAFFOLD_ALIASES = {
 
 def build_plugin_router(deps):
     router = APIRouter()
+
+    def ensure_project_loaded(request_project_path: str | None = None):
+        requested_project_path = (request_project_path or "").strip()
+        current_project_path = (deps["project_cache"].get("project_path") or "").strip()
+        analysis = deps["project_cache"].get("analysis")
+
+        if analysis:
+            if not requested_project_path:
+                return None
+            if os.path.normcase(current_project_path) == os.path.normcase(requested_project_path):
+                return None
+
+        if not requested_project_path:
+            return {"error": "No project has been scanned yet."}
+
+        result = deps["load_project_into_cache"](requested_project_path)
+        if "error" in result:
+            return result
+        return None
 
     def build_blueprint_scaffold_editor_action(response):
         asset_name = response.get("recommended_asset_name", "")
@@ -264,6 +286,22 @@ def build_plugin_router(deps):
         lowered = message.strip().lower()
         has_selection = bool(selection_name or asset_path or class_name)
 
+        if should_route_to_agent_session(
+            message=message,
+            selection_name=selection_name,
+            asset_path=asset_path,
+            class_name=class_name,
+            exported_text=exported_text,
+        ):
+            return {
+                "intent": "agent_session",
+                "asset_kind": "",
+                "asset_name": "",
+                "purpose": "",
+                "class_name": class_name,
+                "change_request": message,
+            }
+
         if exported_text.strip():
             return {
                 "intent": "asset_deep_analysis",
@@ -332,7 +370,7 @@ def build_plugin_router(deps):
 You are classifying a UE5 plugin chat request into one backend action.
 
 Return JSON only with these keys:
-- intent: one of ask, plugin_asset_details, asset_edit_plan, asset_scaffold, asset_deep_analysis
+- intent: one of ask, plugin_asset_details, asset_edit_plan, asset_scaffold, asset_deep_analysis, agent_session
 - asset_kind: empty string when unknown
 - asset_name: empty string when unknown
 - purpose: empty string when unknown
@@ -345,7 +383,9 @@ Rules:
 - Use asset_edit_plan when the user wants to change, rename, add to, or fix the selected asset.
 - Use asset_scaffold when the user wants a new asset planned or created.
 - Use asset_deep_analysis when exported graph/state text is provided or the user explicitly asks for deep analysis.
+- Use agent_session when the request is a multi-step implementation task that crosses code plus assets, needs a staged workflow, or should pause for confirmation before editor-side changes.
 - Prefer asset_edit_plan over plugin_asset_details when the user asks for a change.
+- Prefer agent_session over asset_edit_plan when the user is asking for a broader feature workflow instead of a single asset edit.
 - Preserve concrete asset names and class hints when they appear.
 
 User message:
@@ -381,6 +421,96 @@ Relevant project files:
             pass
 
         return fallback_chat_intent(message, selection_name, asset_path, class_name, exported_text)
+
+    def should_route_to_agent_session(*, message: str, selection_name: str, asset_path: str, class_name: str, exported_text: str) -> bool:
+        lowered = (message or "").strip().lower()
+        if not lowered or exported_text.strip():
+            return False
+
+        if any(token in lowered for token in ("plan only", "just explain", "explain", "inspect")):
+            return False
+
+        code_tokens = (
+            "code",
+            "c++",
+            "cpp",
+            "class",
+            "function",
+            "hook",
+            "wire",
+            "bind",
+            "player character",
+            "character",
+            "controller",
+            "component",
+        )
+        asset_tokens = (
+            "asset",
+            "blueprint",
+            "input action",
+            "mapping context",
+            "material",
+            "behavior tree",
+            "state tree",
+            "niagara",
+            "metasound",
+        )
+        multi_step_tokens = (
+            "add ",
+            "implement",
+            "set up",
+            "setup",
+            "create",
+            "and hook",
+            "and wire",
+            "end to end",
+        )
+        has_code_signal = any(token in lowered for token in code_tokens)
+        has_asset_signal = any(token in lowered for token in asset_tokens)
+        has_multi_step_signal = any(token in lowered for token in multi_step_tokens)
+        has_selection = bool(selection_name or asset_path or class_name)
+
+        if ("input" in lowered and has_code_signal and has_multi_step_signal):
+            return True
+        if has_code_signal and has_asset_signal and has_multi_step_signal:
+            return True
+        if has_selection and has_code_signal and any(token in lowered for token in ("follow-up", "workflow", "staged", "confirm")):
+            return True
+        return False
+
+    def build_plugin_agent_session(message: str):
+        session = deps["start_agent_task_session"](
+            goal=message,
+            files=deps["project_cache"]["analysis"]["files"],
+            assets=deps["project_cache"]["analysis"]["assets"],
+            matched_files=deps["search_files"](
+                deps["project_cache"]["analysis"]["files"],
+                message,
+                max_results=8,
+                index_data=deps["project_cache"]["search_index"],
+            ),
+            family_summaries=deps["summarize_specialized_assets"](
+                deps["project_cache"]["analysis"]["files"],
+                deps["project_cache"]["analysis"]["assets"],
+            ),
+        )
+        deps["agent_task_cache"][session["task_id"]] = session
+        deps["remember_interaction"](message, session.get("result", {}).get("summary") or session["steps"][-1]["summary"])
+        return {
+            "intent": "agent_session",
+            "answer": session.get("result", {}).get("summary") or session["steps"][-1]["summary"],
+            "goal": session["goal"],
+            "task_id": session["task_id"],
+            "execution_mode": session["execution_mode"],
+            "status": session["status"],
+            "available_tools": session.get("available_tools", []),
+            "steps": session.get("steps", []),
+            "plan": session.get("plan"),
+            "pending_confirmation": session.get("pending_confirmation"),
+            "approved_editor_action": session.get("approved_editor_action"),
+            "result": session.get("result"),
+            "session": session,
+        }
 
     def build_chat_answer(message: str, selection_name: str, asset_type: str, asset_path: str, class_name: str, matched_files):
         files = deps["project_cache"]["files"]
@@ -448,6 +578,10 @@ Relevant project context:
 
     @router.post("/plugin/asset-details")
     def plugin_asset_details(request: PluginSelectionRequest):
+        ensure_result = ensure_project_loaded(request.project_path)
+        if ensure_result and "error" in ensure_result:
+            return ensure_result
+
         return deps["run_asset_action"](
             "plugin_asset_details",
             analysis=deps["project_cache"]["analysis"],
@@ -470,12 +604,20 @@ Relevant project context:
 
     @router.post("/plugin/asset-edit-plan")
     def plugin_asset_edit_plan(request: PluginSelectionRequest):
+        ensure_result = ensure_project_loaded(request.project_path)
+        if ensure_result and "error" in ensure_result:
+            return ensure_result
+
         selection = (request.selection_name or request.asset_path or request.class_name or "").strip()
         change_request = (request.change_request or "").strip()
         return build_asset_edit_plan_response(selection=selection, change_request=change_request)
 
     @router.post("/plugin/selection-context")
     def plugin_selection_context(request: PluginSelectionRequest):
+        ensure_result = ensure_project_loaded(request.project_path)
+        if ensure_result and "error" in ensure_result:
+            return ensure_result
+
         analysis = deps["project_cache"]["analysis"]
         if not analysis:
             return {"error": "No project has been scanned yet."}
@@ -519,6 +661,10 @@ Relevant project context:
 
     @router.post("/plugin/chat")
     def plugin_chat(request: PluginChatRequest):
+        ensure_result = ensure_project_loaded(request.project_path)
+        if ensure_result and "error" in ensure_result:
+            return {"answer": ensure_result["error"]}
+
         analysis = deps["project_cache"]["analysis"]
         if not analysis:
             return {"answer": "No project has been scanned yet."}
@@ -617,12 +763,19 @@ Relevant project context:
                 summarize_with_llm=deps["summarize_deep_asset_with_llm"],
             )
 
+        if intent == "agent_session":
+            return build_plugin_agent_session(message)
+
         answer = build_chat_answer(message, selection_name, selection_type, asset_path, class_name, matched_files)
         answer["intent"] = intent
         return answer
 
     @router.post("/asset-deep-analysis")
     def asset_deep_analysis(request: DeepAssetAnalysisRequest):
+        ensure_result = ensure_project_loaded(request.project_path)
+        if ensure_result and "error" in ensure_result:
+            return ensure_result
+
         return deps["run_asset_action"](
             "asset_deep_analysis",
             analysis=deps["project_cache"]["analysis"],

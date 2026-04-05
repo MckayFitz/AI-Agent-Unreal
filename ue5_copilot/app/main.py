@@ -20,7 +20,12 @@ from app.code_patch_planner import build_code_patch_plan
 from app.code_patch_drafter import build_code_patch_draft
 from app.code_patch_bundle_drafter import build_code_patch_bundle_draft
 from app.task_orchestrator import build_agent_task_plan
-from app.agent_runner import start_agent_task_session, confirm_agent_task_session, resume_agent_task_session
+from app.agent_runner import (
+    start_agent_task_session,
+    confirm_agent_task_session,
+    resume_agent_task_session,
+    confirm_and_continue_agent_task_session,
+)
 from app.prompts import (
     CRASH_LOG_SYSTEM_PROMPT,
     DEEP_ASSET_ANALYSIS_SYSTEM_PROMPT,
@@ -66,6 +71,42 @@ PROJECT_CACHE = {
     "search_index": None,
 }
 AGENT_TASK_CACHE: dict[str, dict] = {}
+
+
+def load_project_into_cache(project_path: str):
+    normalized_project_path = project_path.strip()
+    if not normalized_project_path:
+        return {"error": "Project path is required."}
+
+    result = scan_project(normalized_project_path)
+    if "error" in result:
+        return result
+
+    PROJECT_CACHE["project_path"] = result["project_path"]
+    PROJECT_CACHE["files"] = result["files"]
+    PROJECT_CACHE["assets"] = result["asset_files"]
+    PROJECT_CACHE["analysis"] = build_project_analysis(result["files"], result["asset_files"])
+    PROJECT_CACHE["search_index"] = build_search_index(PROJECT_CACHE["analysis"]["files"])
+    PROJECT_CACHE["conversation_history"] = []
+    PROJECT_CACHE["current_focus"] = None
+    return result
+
+
+def ensure_project_loaded(project_path: str | None = None):
+    requested_project_path = (project_path or "").strip()
+    current_project_path = (PROJECT_CACHE["project_path"] or "").strip()
+    analysis = PROJECT_CACHE["analysis"]
+
+    if analysis:
+        if not requested_project_path:
+            return None
+        if os.path.normcase(current_project_path) == os.path.normcase(requested_project_path):
+            return None
+
+    if not requested_project_path:
+        return {"error": "No project has been scanned yet."}
+
+    return load_project_into_cache(requested_project_path)
 
 
 class ScanRequest(BaseModel):
@@ -116,10 +157,12 @@ class ReflectionRequest(BaseModel):
 
 class TaskRequest(BaseModel):
     goal: str
+    project_path: str | None = None
 
 
 class AgentTaskRequest(BaseModel):
     goal: str
+    project_path: str | None = None
 
 
 class AgentConfirmationRequest(BaseModel):
@@ -153,23 +196,10 @@ def status():
 
 @app.post("/scan-project")
 def scan_project_endpoint(request: ScanRequest):
-    project_path = request.project_path.strip()
-    if not project_path:
-        return {"error": "Project path is required."}
-
     try:
-        result = scan_project(project_path)
-
+        result = load_project_into_cache(request.project_path)
         if "error" in result:
             return result
-
-        PROJECT_CACHE["project_path"] = result["project_path"]
-        PROJECT_CACHE["files"] = result["files"]
-        PROJECT_CACHE["assets"] = result["asset_files"]
-        PROJECT_CACHE["analysis"] = build_project_analysis(result["files"], result["asset_files"])
-        PROJECT_CACHE["search_index"] = build_search_index(PROJECT_CACHE["analysis"]["files"])
-        PROJECT_CACHE["conversation_history"] = []
-        PROJECT_CACHE["current_focus"] = None
 
         return {
             "message": "Project scanned successfully.",
@@ -291,6 +321,10 @@ def task_workflow(request: TaskRequest):
     if not goal:
         return {"error": "Describe the task first."}
 
+    ensure_result = ensure_project_loaded(request.project_path)
+    if ensure_result and "error" in ensure_result:
+        return ensure_result
+
     analyzed_files = get_analyzed_files()
     if not analyzed_files:
         return {"error": "No project has been scanned yet."}
@@ -315,6 +349,10 @@ def agent_task(request: AgentTaskRequest):
     goal = request.goal.strip()
     if not goal:
         return {"error": "Describe the task first."}
+
+    ensure_result = ensure_project_loaded(request.project_path)
+    if ensure_result and "error" in ensure_result:
+        return ensure_result
 
     analysis = PROJECT_CACHE["analysis"]
     analyzed_files = get_analyzed_files()
@@ -349,6 +387,10 @@ def agent_session(request: AgentTaskRequest):
     goal = request.goal.strip()
     if not goal:
         return {"error": "Describe the task first."}
+
+    ensure_result = ensure_project_loaded(request.project_path)
+    if ensure_result and "error" in ensure_result:
+        return ensure_result
 
     analysis = PROJECT_CACHE["analysis"]
     analyzed_files = get_analyzed_files()
@@ -416,6 +458,24 @@ def agent_session_resume(task_id: str):
     AGENT_TASK_CACHE[task_id] = updated_session
     remember_interaction(
         f"agent-session:{task_id}:resume",
+        updated_session.get("result", {}).get("summary", updated_session["status"]),
+    )
+    return updated_session
+
+
+@app.post("/agent-session/{task_id}/confirm-and-continue")
+def agent_session_confirm_and_continue(task_id: str, request: AgentConfirmationRequest):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+
+    updated_session = confirm_and_continue_agent_task_session(session, decision=request.decision)
+    if updated_session.get("error"):
+        return updated_session
+
+    AGENT_TASK_CACHE[task_id] = updated_session
+    remember_interaction(
+        f"agent-session:{task_id}:{request.decision.strip().lower()}:confirm-and-continue",
         updated_session.get("result", {}).get("summary", updated_session["status"]),
     )
     return updated_session
@@ -2600,8 +2660,11 @@ def heuristic_log_summary(text, log_type="output"):
 
 app.include_router(build_plugin_router({
     "project_cache": PROJECT_CACHE,
+    "agent_task_cache": AGENT_TASK_CACHE,
+    "load_project_into_cache": load_project_into_cache,
     "run_asset_action": run_asset_action,
     "search_files": search_files,
+    "start_agent_task_session": start_agent_task_session,
     "selection_analysis": selection_analysis,
     "selection_request_class": SelectionRequest,
     "client": client,
@@ -2609,6 +2672,7 @@ app.include_router(build_plugin_router({
     "format_recent_history": format_recent_history,
     "remember_interaction": remember_interaction,
     "include_ai_summary": lambda: bool(os.getenv("OPENAI_API_KEY")),
+    "summarize_specialized_assets": summarize_specialized_assets,
     "summarize_deep_asset_with_llm": summarize_deep_asset_with_llm,
     "looks_like_rename_request": looks_like_rename_request,
     "looks_like_function_request": looks_like_function_request,

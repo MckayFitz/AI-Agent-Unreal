@@ -7,7 +7,7 @@ This document explains the near-term command contract between the Unreal plugin 
 Today the plugin already sends:
 - selection context requests
 - deep asset analysis requests
-- free-form ask requests
+- plugin chat requests that can answer directly or escalate into a live agent session
 - scaffold requests for create-ready asset plans
 
 The backend also supports plan-oriented routes for:
@@ -84,13 +84,23 @@ Phase C: confirmed execution
 ## Current route expectations
 
 The backend currently exposes these planning and analysis routes for plugin use:
+- `/plugin/chat`
 - `/plugin/selection-context`
 - `/plugin/asset-details`
 - `/plugin/asset-edit-plan`
 - `/asset-scaffold`
 - `/asset-deep-analysis`
+- `/agent-session`
+- `/agent-session/{task_id}/status`
+- `/agent-session/{task_id}/confirm-and-continue`
+- `/agent-session/{task_id}/confirm`
+- `/agent-session/{task_id}/resume`
 
 The backend can already return scaffold, inspection, and edit-plan payloads for the supported asset families listed above. Plugin-side mutation and confirmation UX is still the next phase.
+
+`/plugin/chat` is now the broad front door for the plugin. It can still return a direct answer or a single asset plan, but it can also return a live `agent_session` payload for multi-step goals that span project context, code drafts, confirmation, and follow-up asset work.
+
+For approval-driven workflows, `/agent-session/{task_id}/confirm-and-continue` is now the preferred path. It records approval and immediately continues backend-side follow-up planning in one round trip. The separate `/confirm` and `/resume` routes still exist for manual or advanced control flows.
 
 The plugin currently executes these safe editor actions:
 - `rename_asset`

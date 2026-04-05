@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from fastapi.testclient import TestClient
 
@@ -88,6 +90,7 @@ class ApiContractTests(unittest.TestCase):
     def tearDown(self):
         app_main.PROJECT_CACHE.clear()
         app_main.PROJECT_CACHE.update(self.previous_cache)
+        app_main.AGENT_TASK_CACHE.clear()
 
     def load_analysis(self, analysis):
         app_main.PROJECT_CACHE["project_path"] = "C:/Project"
@@ -196,6 +199,39 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["resolved_asset_name"], "BP_PlayerCharacter")
         self.assertEqual(payload["asset"]["family"], "blueprint")
 
+    def test_plugin_asset_details_auto_scans_project_when_project_path_is_provided(self):
+        app_main.PROJECT_CACHE["project_path"] = None
+        app_main.PROJECT_CACHE["files"] = []
+        app_main.PROJECT_CACHE["assets"] = []
+        app_main.PROJECT_CACHE["analysis"] = None
+        app_main.PROJECT_CACHE["search_index"] = None
+
+        with TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            (project_root / "Source" / "MyGame" / "Public").mkdir(parents=True, exist_ok=True)
+            (project_root / "Content" / "Blueprints").mkdir(parents=True, exist_ok=True)
+            (project_root / "Source" / "MyGame" / "Public" / "MyPlayerCharacter.h").write_text(
+                "UCLASS(Blueprintable) class AMyPlayerCharacter : public ACharacter { GENERATED_BODY() };",
+                encoding="utf-8",
+            )
+            (project_root / "Content" / "Blueprints" / "BP_PlayerCharacter.uasset").write_bytes(b"\x00")
+
+            response = self.client.post(
+                "/plugin/asset-details",
+                json={
+                    "selection_name": "BP_PlayerCharacter",
+                    "asset_path": "Content/Blueprints/BP_PlayerCharacter.uasset",
+                    "class_name": "Blueprint",
+                    "project_path": str(project_root),
+                    "source": "ue5_plugin",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["resolved_asset_name"], "BP_PlayerCharacter")
+        self.assertEqual(app_main.PROJECT_CACHE["project_path"], str(project_root))
+
     def test_plugin_asset_edit_plan_returns_blueprint_variable_plan(self):
         response = self.client.post(
             "/plugin/asset-edit-plan",
@@ -291,6 +327,56 @@ class ApiContractTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["resolved_asset_kind"], "metasound")
         self.assertIn("MetaSound", payload["summary"])
+
+    def test_plugin_chat_routes_multi_step_request_to_agent_session(self):
+        response = self.client.post(
+            "/plugin/chat",
+            json={
+                "message": "add sprint input and hook it to the player character",
+                "selection_name": "BP_PlayerCharacter",
+                "selection_type": "asset",
+                "asset_path": "Content/Blueprints/BP_PlayerCharacter.uasset",
+                "class_name": "Blueprint",
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["intent"], "agent_session")
+        self.assertTrue(payload["task_id"])
+        self.assertEqual(payload["status"], "awaiting_confirmation")
+        self.assertEqual(payload["execution_mode"], "agent_loop")
+        self.assertEqual(payload["steps"][0]["tool_name"], "inspect_project_context")
+        self.assertEqual(payload["steps"][1]["tool_name"], "plan_task")
+        self.assertEqual(payload["available_tools"], ["confirm_agent_step"])
+        self.assertEqual(payload["pending_confirmation"]["editor_action"]["action_type"], "apply_code_patch_bundle_preview")
+        self.assertEqual(payload["result"]["code_patch_bundle"]["draft_files"][0]["path"], "Source/MyGame/Public/Player/MyPlayerCharacter.h")
+        self.assertEqual(payload["session"]["execution_mode"], "agent_loop")
+        self.assertEqual(
+            app_main.AGENT_TASK_CACHE[payload["task_id"]]["status"],
+            "awaiting_confirmation",
+        )
+
+    def test_plugin_chat_keeps_simple_asset_edit_plan_flow(self):
+        response = self.client.post(
+            "/plugin/chat",
+            json={
+                "message": "set roughness to 0.35",
+                "selection_name": "MI_WeaponGlow",
+                "selection_type": "asset",
+                "asset_path": "Content/Materials/Instances/MI_WeaponGlow.uasset",
+                "class_name": "MaterialInstance",
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["asset_kind"], "material_edit")
+        self.assertEqual(payload["editor_action"]["action_type"], "tweak_material_parameter")
+        self.assertEqual(payload["editor_action"]["arguments"]["parameter_name"], "Roughness")
+        self.assertEqual(payload["editor_action"]["arguments"]["parameter_value"], "0.35")
 
     def test_agent_task_returns_structured_hybrid_plan(self):
         response = self.client.post(
@@ -408,6 +494,31 @@ class ApiContractTests(unittest.TestCase):
             resumed_payload["result"]["supporting_asset_scaffolds"][1]["editor_action"]["arguments"]["package_path"],
             "/Game/Input/Contexts",
         )
+
+    def test_agent_session_confirm_and_continue_collapses_approve_and_resume(self):
+        create_response = self.client.post(
+            "/agent-session",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(create_response.status_code, 200)
+        task_id = create_response.json()["task_id"]
+
+        continue_response = self.client.post(
+            f"/agent-session/{task_id}/confirm-and-continue",
+            json={"decision": "approve"},
+        )
+        self.assertEqual(continue_response.status_code, 200)
+
+        payload = continue_response.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["steps"][-4]["tool_name"], "resolve_confirmation")
+        self.assertEqual(payload["steps"][-3]["tool_name"], "prepare_editor_handoff")
+        self.assertEqual(payload["steps"][-2]["tool_name"], "plan_supporting_assets")
+        self.assertEqual(payload["steps"][-1]["tool_name"], "draft_supporting_asset_scaffolds")
+        self.assertEqual(payload["available_tools"], [])
+        self.assertEqual(payload["result"]["next_action"], "apply_in_editor_and_validate")
+        self.assertEqual(payload["approved_editor_action"]["action_type"], "apply_code_patch_bundle_preview")
+        self.assertEqual(payload["result"]["followup_asset_plans"][0]["recommended_name"], "IA_Sprint")
 
     def test_agent_session_completes_without_confirmation_for_non_code_goal(self):
         response = self.client.post(
