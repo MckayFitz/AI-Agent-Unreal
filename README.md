@@ -1,10 +1,11 @@
-# UE5 AI Agent
+# UE5 FitzAI Agent
 
 An AI-powered assistant designed to help Unreal Engine 5 developers understand their projects, debug errors, and navigate complex C++ codebases.
 
 This tool scans a UE5 project, extracts relevant source files, and allows developers to ask questions about their code or paste build errors for instant analysis.
 
 ---
+<img width="1911" height="1005" alt="Screenshot 2026-04-04 182559" src="https://github.com/user-attachments/assets/9d05ec39-a394-426a-98f1-f3722c86eb7f" />
 
 
 ## 🚀 Features
