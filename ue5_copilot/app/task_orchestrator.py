@@ -24,11 +24,13 @@ def build_agent_task_plan(
     suggested_editor_actions = infer_suggested_editor_actions(task_type, candidate_assets)
     stages = build_execution_stages(task_type, candidate_files, candidate_assets, systems)
     risks = infer_task_risks(task_type, candidate_assets, systems)
+    unreal_tool_catalog = build_unreal_tool_catalog(task_type=task_type, candidate_assets=candidate_assets)
 
     result = {
         "goal": normalized_goal,
         "task_type": task_type,
         "execution_mode": "plan_only",
+        "agent_profile": "tool_using_agent",
         "summary": build_summary(task_type, candidate_files, candidate_assets, systems),
         "systems": systems,
         "candidate_files": candidate_files[:8],
@@ -36,6 +38,9 @@ def build_agent_task_plan(
         "suggested_backend_routes": suggested_routes,
         "suggested_editor_actions": suggested_editor_actions,
         "tool_preferences": infer_tool_preferences(task_type, lowered_goal, candidate_assets),
+        "unreal_tool_catalog": unreal_tool_catalog,
+        "recommended_tool_chain": build_recommended_tool_chain(unreal_tool_catalog),
+        "confirmation_policy": infer_confirmation_policy(task_type),
         "stages": stages,
         "risks": risks[:8],
     }
@@ -169,16 +174,21 @@ def infer_systems(candidate_files: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def infer_suggested_routes(task_type: str, candidate_assets: list[dict[str, Any]]) -> list[str]:
-    routes = ["/task-workflow"]
+    routes = ["/task-workflow", "/agent-tools", "/scan-project"]
     if task_type in {"investigation", "code_change", "hybrid_feature"}:
         routes.append("/ask")
+        routes.append("/references")
     if candidate_assets:
         routes.append("/plugin/selection-context")
         routes.append("/plugin/asset-details")
+        routes.append("/asset-deep-analysis")
     if task_type in {"asset_edit", "hybrid_feature"}:
         routes.append("/plugin/asset-edit-plan")
     if task_type in {"asset_creation", "hybrid_feature"}:
         routes.append("/asset-scaffold")
+    if task_type in {"code_change", "code_generation", "hybrid_feature"}:
+        routes.append("/code-patch-bundle-draft")
+        routes.append("/agent-session")
     return dedupe_strings(routes)
 
 
@@ -190,10 +200,200 @@ def infer_suggested_editor_actions(task_type: str, candidate_assets: list[dict[s
         actions.append("create_asset")
     if task_type in {"asset_edit", "hybrid_feature"}:
         actions.append("rename_asset")
+        actions.append("apply_asset_edit_preview")
+    if task_type in {"code_change", "code_generation", "hybrid_feature"}:
+        actions.append("apply_code_patch_bundle_preview")
     if "material_instance" in families or "material" in families:
         actions.append("tweak_material_parameter")
 
     return dedupe_strings(actions)
+
+
+def build_unreal_tool_catalog(
+    *,
+    task_type: str,
+    candidate_assets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    families = {(item.get("family") or "").lower() for item in candidate_assets}
+    entries = [
+        {
+            "name": "read_current_selection",
+            "label": "Read current selection",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/selection-context",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["investigation", "asset_edit", "asset_creation", "hybrid_feature", "task_plan"],
+            "capability_tags": ["selection", "context", "asset-awareness"],
+            "summary": "Resolve the current editor selection into matching files, assets, and specialized family hints.",
+        },
+        {
+            "name": "inspect_asset_metadata",
+            "label": "Inspect asset metadata",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/asset-details",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["investigation", "asset_edit", "hybrid_feature", "task_plan"],
+            "capability_tags": ["asset", "metadata", "ownership"],
+            "summary": "Inspect selected asset metadata, likely code owners, and Blueprint-linked C++ classes.",
+        },
+        {
+            "name": "extract_blueprint_graph_state",
+            "label": "Extract Blueprint graph/state data",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/asset-deep-analysis",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["investigation", "asset_edit", "hybrid_feature"],
+            "capability_tags": ["blueprint", "graph", "state", "deep-analysis"],
+            "summary": "Interpret pasted/exported Blueprint, behavior, animation, or graph text as structured analysis.",
+        },
+        {
+            "name": "search_project_symbols",
+            "label": "Search references and symbols",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/references",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["investigation", "code_change", "code_generation", "hybrid_feature", "task_plan"],
+            "capability_tags": ["search", "references", "symbols", "ownership"],
+            "summary": "Search project references, symbols, and likely ownership paths before editing.",
+        },
+        {
+            "name": "scan_project_context",
+            "label": "Scan project context",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/scan-project",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["investigation", "code_change", "code_generation", "asset_creation", "asset_edit", "hybrid_feature", "task_plan"],
+            "capability_tags": ["scan", "project", "indexing"],
+            "summary": "Scan source and asset inventories so the agent can reason over the current Unreal project.",
+        },
+        {
+            "name": "plan_code_changes",
+            "label": "Plan code changes",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/code-patch-bundle-draft",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["code_change", "code_generation", "hybrid_feature"],
+            "capability_tags": ["code", "preview", "multi-file"],
+            "editor_action_types": ["apply_code_patch_bundle_preview"],
+            "summary": "Draft a preview-only multi-file code bundle before any editor-side file apply step.",
+        },
+        {
+            "name": "plan_asset_creation",
+            "label": "Create assets safely",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/asset-scaffold",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["asset_creation", "hybrid_feature"],
+            "capability_tags": ["asset", "create", "scaffold"],
+            "editor_action_types": ["create_asset"],
+            "summary": "Create scaffold-ready Unreal asset plans that stay confirmation-gated before editor mutation.",
+        },
+        {
+            "name": "plan_asset_edits",
+            "label": "Apply safe asset edits",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/asset-edit-plan",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["asset_edit", "hybrid_feature"],
+            "capability_tags": ["asset", "rename", "edit", "preview"],
+            "editor_action_types": ["rename_asset", "tweak_material_parameter", "modify_behavior_tree", "modify_state_tree", "modify_control_rig", "modify_niagara_system", "modify_eqs_query", "modify_level_sequence", "modify_metasound", "modify_pcg_graph", "modify_motion_matching_asset", "modify_ik_rig"],
+            "summary": "Produce safe, structured asset edit plans and confirmation-gated editor actions for supported Unreal families.",
+        },
+        {
+            "name": "open_asset_in_editor",
+            "label": "Open assets in editor",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/tool",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["investigation", "asset_edit", "asset_creation", "hybrid_feature", "task_plan"],
+            "capability_tags": ["editor", "navigation", "asset"],
+            "summary": "Open the selected asset or generated follow-up assets directly inside the Unreal Editor.",
+        },
+        {
+            "name": "create_cpp_classes_plugins_modules",
+            "label": "Create classes/plugins/modules",
+            "status": "planned",
+            "execution_target": "plugin_action",
+            "safe_to_autorun": False,
+            "requires_confirmation": True,
+            "mutates_project": True,
+            "supported_task_types": ["code_generation", "hybrid_feature"],
+            "capability_tags": ["code", "class", "plugin", "module"],
+            "summary": "Create native Unreal code artifacts such as C++ classes, plugins, or modules with explicit confirmation.",
+        },
+        {
+            "name": "compile_project_and_surface_errors",
+            "label": "Compile and surface errors",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/tool",
+            "safe_to_autorun": False,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["code_change", "code_generation", "hybrid_feature"],
+            "capability_tags": ["compile", "validation", "errors"],
+            "summary": "Run compile/build validation from the Unreal side and feed the resulting errors back into the agent loop.",
+        },
+    ]
+
+    for entry in entries:
+        entry["recommended"] = is_tool_recommended(entry, task_type=task_type, families=families)
+
+    entries.sort(key=lambda item: (-int(item["recommended"]), item["label"]))
+    return entries
+
+
+def is_tool_recommended(entry: dict[str, Any], *, task_type: str, families: set[str]) -> bool:
+    if task_type in entry.get("supported_task_types", []):
+        if entry["name"] == "extract_blueprint_graph_state":
+            return bool(families & {"blueprint", "animation", "behavior_tree", "state_tree", "control_rig", "niagara", "eqs", "sequencer", "metasound", "pcg", "motion_matching", "ik_rig"})
+        return True
+    return False
+
+
+def build_recommended_tool_chain(unreal_tool_catalog: list[dict[str, Any]]) -> list[str]:
+    return [item["name"] for item in unreal_tool_catalog if item.get("recommended")][:6]
+
+
+def infer_confirmation_policy(task_type: str) -> dict[str, Any]:
+    requires_apply_confirmation = task_type in {"code_change", "code_generation", "asset_creation", "asset_edit", "hybrid_feature"}
+    return {
+        "dry_run_before_apply": True,
+        "requires_confirmation_for_editor_mutation": requires_apply_confirmation,
+        "confirmation_triggers": [
+            "code patch apply",
+            "asset rename or creation",
+            "plugin-side editor mutation",
+        ],
+        "resume_after_approval": True,
+    }
 
 
 def infer_tool_preferences(task_type: str, lowered_goal: str, candidate_assets: list[dict[str, Any]]) -> dict[str, Any]:

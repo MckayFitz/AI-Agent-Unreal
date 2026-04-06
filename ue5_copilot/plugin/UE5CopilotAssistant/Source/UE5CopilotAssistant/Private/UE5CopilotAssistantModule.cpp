@@ -1,3 +1,4 @@
+#include "Async/Async.h"
 #include "UE5CopilotAssistantModule.h"
 
 #include "AssetRegistry/AssetData.h"
@@ -21,6 +22,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/FileManager.h"
 #include "Http.h"
 #include "HttpModule.h"
 #include "IContentBrowserSingleton.h"
@@ -28,8 +30,10 @@
 #include "Interfaces/IHttpResponse.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/MessageDialog.h"
+#include "Misc/App.h"
 #include "Misc/PackageName.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/SecureHash.h"
@@ -37,6 +41,7 @@
 #include "Materials/MaterialInstanceConstant.h"
 #include "MaterialEditingLibrary.h"
 #include "Engine/Texture.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Styling/AppStyle.h"
@@ -81,6 +86,23 @@ namespace UE5CopilotAssistant
             }
         }
         return Result;
+    }
+
+    FString TailLines(const FString& Text, int32 MaxLines = 40)
+    {
+        TArray<FString> Lines;
+        Text.ParseIntoArrayLines(Lines, false);
+        if (Lines.Num() <= MaxLines)
+        {
+            return JoinLines(Lines);
+        }
+
+        TArray<FString> Tail;
+        for (int32 Index = Lines.Num() - MaxLines; Index < Lines.Num(); ++Index)
+        {
+            Tail.Add(Lines[Index]);
+        }
+        return JoinLines(Tail);
     }
 
     FString EscapeJson(const FString& Value)
@@ -514,6 +536,105 @@ namespace UE5CopilotAssistant
         return false;
     }
 
+    bool OpenAssetInEditor(const FString& AssetPath, FString& OutError)
+    {
+        if (AssetPath.IsEmpty())
+        {
+            OutError = TEXT("Open-asset actions require an `asset_path`.");
+            return false;
+        }
+
+        UObject* AssetObject = LoadObject<UObject>(nullptr, *AssetPath);
+        if (!AssetObject)
+        {
+            const FSoftObjectPath SoftObjectPath(AssetPath);
+            AssetObject = SoftObjectPath.TryLoad();
+        }
+        if (!AssetObject)
+        {
+            OutError = FString::Printf(TEXT("The asset `%s` could not be loaded in the editor."), *AssetPath);
+            return false;
+        }
+
+        UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+        if (!AssetEditorSubsystem)
+        {
+            OutError = TEXT("The Asset Editor subsystem is not available.");
+            return false;
+        }
+
+        AssetEditorSubsystem->OpenEditorForAsset(AssetObject);
+        return true;
+    }
+
+    bool BuildCompileProjectInvocation(
+        const FString& RequestedProjectPath,
+        const FString& RequestedTargetName,
+        const FString& RequestedPlatform,
+        const FString& RequestedConfiguration,
+        FString& OutExecutable,
+        FString& OutArguments,
+        FString& OutLogPath,
+        FString& OutResolvedTargetName,
+        FString& OutResolvedPlatform,
+        FString& OutResolvedConfiguration,
+        FString& OutError)
+    {
+        FString ProjectFilePath = FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath());
+        if (ProjectFilePath.IsEmpty())
+        {
+            OutError = TEXT("The current Unreal project file could not be resolved.");
+            return false;
+        }
+
+        const FString BuildScriptPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::EngineDir(), TEXT("Build"), TEXT("BatchFiles"), TEXT("Build.bat")));
+        if (!FPaths::FileExists(BuildScriptPath))
+        {
+            OutError = FString::Printf(TEXT("The Unreal Build script was not found at `%s`."), *BuildScriptPath);
+            return false;
+        }
+
+        const FString TargetName = RequestedTargetName.TrimStartAndEnd().IsEmpty()
+            ? FString::Printf(TEXT("%sEditor"), FApp::GetProjectName())
+            : RequestedTargetName.TrimStartAndEnd();
+        const FString Platform = RequestedPlatform.TrimStartAndEnd().IsEmpty() ? TEXT("Win64") : RequestedPlatform.TrimStartAndEnd();
+        const FString Configuration = RequestedConfiguration.TrimStartAndEnd().IsEmpty() ? TEXT("Development") : RequestedConfiguration.TrimStartAndEnd();
+        OutResolvedTargetName = TargetName;
+        OutResolvedPlatform = Platform;
+        OutResolvedConfiguration = Configuration;
+
+        const FString RequestedProjectRoot = RequestedProjectPath.TrimStartAndEnd();
+        if (!RequestedProjectRoot.IsEmpty())
+        {
+            FString NormalizedRequestedRoot = FPaths::ConvertRelativePathToFull(RequestedProjectRoot);
+            FString NormalizedCurrentRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+            FPaths::NormalizeFilename(NormalizedRequestedRoot);
+            FPaths::NormalizeFilename(NormalizedCurrentRoot);
+            if (!NormalizedCurrentRoot.StartsWith(NormalizedRequestedRoot) && !NormalizedRequestedRoot.StartsWith(NormalizedCurrentRoot))
+            {
+                OutError = TEXT("The requested compile project path does not match the currently open Unreal project.");
+                return false;
+            }
+        }
+
+        const FString LogDirectory = FPaths::Combine(FPaths::ProjectLogDir(), TEXT("UE5CopilotAssistant"));
+        IFileManager::Get().MakeDirectory(*LogDirectory, true);
+        OutLogPath = FPaths::Combine(
+            LogDirectory,
+            FString::Printf(TEXT("compile_%s.log"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")))
+        );
+
+        OutExecutable = BuildScriptPath;
+        OutArguments = FString::Printf(
+            TEXT("%s %s %s -Project=\"%s\" -WaitMutex -NoHotReloadFromIDE"),
+            *TargetName,
+            *Platform,
+            *Configuration,
+            *ProjectFilePath
+        );
+        return true;
+    }
+
     FString BuildAskPayload(const FString& Prompt)
     {
         return FString::Printf(TEXT("{\"question\":\"%s\"}"), *EscapeJson(Prompt));
@@ -836,6 +957,39 @@ namespace UE5CopilotAssistant
         );
     }
 
+    FString BuildPluginToolPayload(
+        const FString& ToolName,
+        const FString& SelectionName,
+        const FString& SelectionType,
+        const FString& AssetPath,
+        const FString& ClassName,
+        const FString& ExportedText = FString(),
+        const FString& ToolArgsJson = TEXT("{}"))
+    {
+        const FString ProjectPath = GetCurrentProjectPathForPayload();
+        return FString::Printf(
+            TEXT("{\"tool_name\":\"%s\",\"selection_name\":\"%s\",\"selection_type\":\"%s\",\"asset_path\":\"%s\",\"class_name\":\"%s\",\"exported_text\":\"%s\",\"tool_args\":%s,\"project_path\":\"%s\",\"source\":\"ue5_plugin\"}"),
+            *EscapeJson(ToolName),
+            *EscapeJson(SelectionName),
+            *EscapeJson(SelectionType),
+            *EscapeJson(AssetPath),
+            *EscapeJson(ClassName),
+            *EscapeJson(ExportedText),
+            *ToolArgsJson,
+            *EscapeJson(ProjectPath)
+        );
+    }
+
+    FString BuildPluginToolPayloadForSelection(
+        const FString& ToolName,
+        const FString& SelectionName,
+        const FString& SelectionType,
+        const FString& AssetPath,
+        const FString& ClassName)
+    {
+        return BuildPluginToolPayload(ToolName, SelectionName, SelectionType, AssetPath, ClassName);
+    }
+
     FString BuildPluginAssetEditPlanPayload(const FString& SelectionName, const FString& SelectionType, const FString& AssetPath, const FString& ClassName, const FString& ChangeRequest)
     {
         const FString ProjectPath = GetCurrentProjectPathForPayload();
@@ -859,6 +1013,80 @@ namespace UE5CopilotAssistant
             *EscapeJson(Purpose),
             *EscapeJson(ClassName)
         );
+    }
+
+    FString BuildPluginToolAssetEditPayload(
+        const FString& SelectionName,
+        const FString& SelectionType,
+        const FString& AssetPath,
+        const FString& ClassName,
+        const FString& ChangeRequest)
+    {
+        const FString ToolArgsJson = FString::Printf(
+            TEXT("{\"change_request\":\"%s\"}"),
+            *EscapeJson(ChangeRequest)
+        );
+        return BuildPluginToolPayload(TEXT("plan_asset_edits"), SelectionName, SelectionType, AssetPath, ClassName, FString(), ToolArgsJson);
+    }
+
+    FString BuildPluginToolAssetScaffoldPayload(const FString& AssetKind, const FString& Name, const FString& Purpose, const FString& ClassName)
+    {
+        const FString ToolArgsJson = FString::Printf(
+            TEXT("{\"asset_kind\":\"%s\",\"name\":\"%s\",\"purpose\":\"%s\",\"class_name\":\"%s\"}"),
+            *EscapeJson(AssetKind),
+            *EscapeJson(Name),
+            *EscapeJson(Purpose),
+            *EscapeJson(ClassName)
+        );
+        return BuildPluginToolPayload(TEXT("plan_asset_creation"), FString(), FString(), FString(), FString(), FString(), ToolArgsJson);
+    }
+
+    FString BuildPluginToolCompilePayload()
+    {
+        return BuildPluginToolPayload(TEXT("compile_project_and_surface_errors"), FString(), FString(), FString(), FString());
+    }
+
+    FString BuildPluginToolCompileResultPayload(
+        int32 ExitCode,
+        const FString& TargetName,
+        const FString& Platform,
+        const FString& Configuration,
+        const FString& LogPath,
+        const FString& OutputText)
+    {
+        const FString ToolArgsJson = FString::Printf(
+            TEXT("{\"exit_code\":%d,\"target_name\":\"%s\",\"platform\":\"%s\",\"configuration\":\"%s\",\"log_path\":\"%s\",\"output_text\":\"%s\",\"auto_start_agent_session\":true}"),
+            ExitCode,
+            *EscapeJson(TargetName),
+            *EscapeJson(Platform),
+            *EscapeJson(Configuration),
+            *EscapeJson(LogPath),
+            *EscapeJson(OutputText)
+        );
+        return BuildPluginToolPayload(TEXT("report_compile_result"), FString(), FString(), FString(), FString(), FString(), ToolArgsJson);
+    }
+
+    FString BuildPluginToolPayloadFromSuggestedInvocation(const TSharedPtr<FJsonObject>& InvocationObject)
+    {
+        if (!InvocationObject.IsValid())
+        {
+            return FString();
+        }
+
+        FString ToolName;
+        if (!InvocationObject->TryGetStringField(TEXT("tool_name"), ToolName) || ToolName.IsEmpty())
+        {
+            return FString();
+        }
+
+        FString ToolArgsJson = TEXT("{}");
+        const TSharedPtr<FJsonObject>* ToolArgsObject = nullptr;
+        if (InvocationObject->TryGetObjectField(TEXT("tool_args"), ToolArgsObject) && ToolArgsObject && ToolArgsObject->IsValid())
+        {
+            ToolArgsJson = SerializeJsonObject(*ToolArgsObject);
+        }
+
+        return BuildPluginToolPayload(ToolName, FString(), FString(), FString(), FString(), FString(), ToolArgsJson);
     }
 
     FString BuildAgentTaskPayload(const FString& Goal)
@@ -1624,6 +1852,21 @@ namespace UE5CopilotAssistant
                 {
                     Module->ClearCurrentAgentTaskId();
                 }
+
+                FString PreferredTargetPath;
+                const TSharedPtr<FJsonObject>* PayloadObject = nullptr;
+                if (JsonObject->TryGetObjectField(TEXT("payload"), PayloadObject) && PayloadObject && PayloadObject->IsValid())
+                {
+                    (*PayloadObject)->TryGetStringField(TEXT("preferred_target_path"), PreferredTargetPath);
+                }
+                if (PreferredTargetPath.IsEmpty())
+                {
+                    JsonObject->TryGetStringField(TEXT("preferred_target_path"), PreferredTargetPath);
+                }
+                if (!PreferredTargetPath.IsEmpty())
+                {
+                    Module->SetPreferredCodeTargetPath(PreferredTargetPath);
+                }
             }
             SyncPreviewEditorAction(JsonObject, BundleApplyTargetPathTextBox, PendingEditorActionJsonPtr, EditorActionPreview);
         }
@@ -2059,6 +2302,20 @@ void FUE5CopilotAssistantModule::ClearPendingCodePatchBundleTargets()
     }
 }
 
+void FUE5CopilotAssistantModule::SetPreferredCodeTargetPath(const FString& TargetPath)
+{
+    const FString SanitizedTargetPath = TargetPath.TrimStartAndEnd();
+    if (SanitizedTargetPath.IsEmpty())
+    {
+        return;
+    }
+
+    if (CodePatchTargetPathTextBoxPtr.IsValid())
+    {
+        CodePatchTargetPathTextBoxPtr->SetText(FText::FromString(SanitizedTargetPath));
+    }
+}
+
 TSharedRef<FExtender> FUE5CopilotAssistantModule::OnExtendContentBrowserAssetSelectionMenu(const TArray<FAssetData>& SelectedAssets)
 {
     TSharedRef<FExtender> Extender = MakeShared<FExtender>();
@@ -2128,8 +2385,9 @@ void FUE5CopilotAssistantModule::RequestAssetDetailsForSelection(FAssetData Asse
     }
 
     EnsureBackendAndSendRequest(
-        BaseUrl + TEXT("/plugin/asset-details"),
-        UE5CopilotAssistant::BuildPluginAssetDetailsPayload(
+        BaseUrl + TEXT("/plugin/tool"),
+        UE5CopilotAssistant::BuildPluginToolPayloadForSelection(
+            TEXT("inspect_asset_metadata"),
             AssetData.AssetName.ToString(),
             TEXT("asset"),
             AssetData.GetSoftObjectPath().ToString(),
@@ -2182,8 +2440,8 @@ void FUE5CopilotAssistantModule::RequestAssetEditPlanForSelection(FAssetData Ass
     }
 
     EnsureBackendAndSendRequest(
-        BaseUrl + TEXT("/plugin/asset-edit-plan"),
-        UE5CopilotAssistant::BuildPluginAssetEditPlanPayload(
+        BaseUrl + TEXT("/plugin/tool"),
+        UE5CopilotAssistant::BuildPluginToolAssetEditPayload(
             AssetData.AssetName.ToString(),
             TEXT("asset"),
             AssetData.GetSoftObjectPath().ToString(),
@@ -2571,6 +2829,107 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                         .AutoHeight()
                         .Padding(0.0f, 0.0f, 0.0f, 8.0f)
                         [
+                            SNew(SHorizontalBox)
+
+                            + SHorizontalBox::Slot()
+                            .FillWidth(1.0f)
+                            .Padding(0.0f, 0.0f, 4.0f, 0.0f)
+                            [
+                                SNew(SButton)
+                                .Text(LOCTEXT("UE5CopilotDiscoverTools", "Discover Agent Tools"))
+                                .ToolTipText(LOCTEXT("UE5CopilotDiscoverToolsTooltip", "Fetch the current backend tool catalog and Unreal capability list."))
+                                .OnClicked_Lambda([this]()
+                                {
+                                    const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                                    if (BaseUrl.IsEmpty())
+                                    {
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingToolCatalogBaseUrl", "Enter a backend base URL first."));
+                                        }
+                                        return FReply::Handled();
+                                    }
+
+                                    CurrentBackendBaseUrl = BaseUrl;
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusLoadingToolCatalog", "Loading the current agent tool catalog..."));
+                                    }
+
+                                    EnsureBackendAndSendRequest(
+                                        BaseUrl + TEXT("/plugin/tool"),
+                                        UE5CopilotAssistant::BuildPluginToolPayload(TEXT("tool_catalog"), FString(), FString(), FString(), FString()),
+                                        OutputTextBoxPtr,
+                                        AgentSessionTextBoxPtr,
+                                        CodeDiffPreviewTextBoxPtr,
+                                        EditorActionPreviewTextBoxPtr,
+                                        BundleApplyTargetPathTextBoxPtr,
+                                        &PendingEditorActionJson,
+                                        StatusTextPtr
+                                    );
+                                    return FReply::Handled();
+                                })
+                            ]
+
+                            + SHorizontalBox::Slot()
+                            .FillWidth(1.0f)
+                            .Padding(4.0f, 0.0f, 0.0f, 0.0f)
+                            [
+                                SNew(SButton)
+                                .Text(LOCTEXT("UE5CopilotReadSelectionContext", "Read Selection Context"))
+                                .ToolTipText(LOCTEXT("UE5CopilotReadSelectionContextTooltip", "Resolve the current selection into matched files, assets, and specialized family hints."))
+                                .OnClicked_Lambda([this]()
+                                {
+                                    const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                                    if (BaseUrl.IsEmpty())
+                                    {
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingSelectionToolBaseUrl", "Enter a backend base URL first."));
+                                        }
+                                        return FReply::Handled();
+                                    }
+                                    CurrentBackendBaseUrl = BaseUrl;
+
+                                    FString SelectionName, SelectionType, AssetPath, ClassName;
+                                    if (!UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName))
+                                    {
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusNoSelectionContextTool", "Select an actor or asset before reading selection context."));
+                                        }
+                                        return FReply::Handled();
+                                    }
+
+                                    if (SelectionPreviewTextPtr.IsValid())
+                                    {
+                                        SelectionPreviewTextPtr->SetText(FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType)));
+                                    }
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusReadingSelectionContext", "Reading the current selection context..."));
+                                    }
+
+                                    EnsureBackendAndSendRequest(
+                                        BaseUrl + TEXT("/plugin/tool"),
+                                        UE5CopilotAssistant::BuildPluginToolPayloadForSelection(TEXT("read_current_selection"), SelectionName, SelectionType, AssetPath, ClassName),
+                                        OutputTextBoxPtr,
+                                        AgentSessionTextBoxPtr,
+                                        CodeDiffPreviewTextBoxPtr,
+                                        EditorActionPreviewTextBoxPtr,
+                                        BundleApplyTargetPathTextBoxPtr,
+                                        &PendingEditorActionJson,
+                                        StatusTextPtr
+                                    );
+                                    return FReply::Handled();
+                                })
+                            ]
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                        [
                             SNew(SExpandableArea)
                             .InitiallyCollapsed(false)
                             .AreaTitle(LOCTEXT("UE5CopilotSelectionToolsHeader", "Selected Asset And Workflow"))
@@ -2711,8 +3070,8 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                     }
 
                                     EnsureBackendAndSendRequest(
-                                        BaseUrl + TEXT("/plugin/asset-details"),
-                                        UE5CopilotAssistant::BuildPluginAssetDetailsPayload(SelectionName, SelectionType, AssetPath, ClassName),
+                                        BaseUrl + TEXT("/plugin/tool"),
+                                        UE5CopilotAssistant::BuildPluginToolPayloadForSelection(TEXT("inspect_asset_metadata"), SelectionName, SelectionType, AssetPath, ClassName),
                                         OutputTextBoxPtr,
                                         AgentSessionTextBoxPtr,
                                         CodeDiffPreviewTextBoxPtr,
@@ -2721,9 +3080,103 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                         &PendingEditorActionJson,
                                         StatusTextPtr
                                     );
-                                    return FReply::Handled();
-                                })
-                            ]
+                                return FReply::Handled();
+                            })
+                        ]
+
+                    + SHorizontalBox::Slot()
+                    .FillWidth(1.0f)
+                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
+                    [
+                        SNew(SButton)
+                        .Text(LOCTEXT("UE5CopilotOpenSelectedAsset", "Open Selected Asset"))
+                        .ToolTipText(LOCTEXT("UE5CopilotOpenSelectedAssetTooltip", "Prepare and execute a safe editor action to open the current asset in Unreal."))
+                        .OnClicked_Lambda([this]()
+                        {
+                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                            if (BaseUrl.IsEmpty())
+                            {
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingBaseUrlOpenAsset", "Enter a backend base URL first."));
+                                }
+                                return FReply::Handled();
+                            }
+                            CurrentBackendBaseUrl = BaseUrl;
+
+                            FString SelectionName, SelectionType, AssetPath, ClassName;
+                            if (!UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName))
+                            {
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusNoSelectionOpenAsset", "Select an asset before trying to open it through the tool flow."));
+                                }
+                                return FReply::Handled();
+                            }
+
+                            if (SelectionPreviewTextPtr.IsValid())
+                            {
+                                SelectionPreviewTextPtr->SetText(FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType)));
+                            }
+                            if (StatusTextPtr.IsValid())
+                            {
+                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusPreparingOpenAsset", "Preparing an open-asset editor action..."));
+                            }
+
+                            EnsureBackendAndSendRequest(
+                                BaseUrl + TEXT("/plugin/tool"),
+                                UE5CopilotAssistant::BuildPluginToolPayloadForSelection(TEXT("open_asset_in_editor"), SelectionName, SelectionType, AssetPath, ClassName),
+                                OutputTextBoxPtr,
+                                AgentSessionTextBoxPtr,
+                                CodeDiffPreviewTextBoxPtr,
+                                EditorActionPreviewTextBoxPtr,
+                                BundleApplyTargetPathTextBoxPtr,
+                                &PendingEditorActionJson,
+                                StatusTextPtr
+                            );
+                            return FReply::Handled();
+                        })
+                    ]
+
+                    + SHorizontalBox::Slot()
+                    .FillWidth(1.0f)
+                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
+                    [
+                        SNew(SButton)
+                        .Text(LOCTEXT("UE5CopilotCompileProject", "Compile Project"))
+                        .ToolTipText(LOCTEXT("UE5CopilotCompileProjectTooltip", "Prepare a compile action for the current Unreal project and surface build output back into the panel."))
+                        .OnClicked_Lambda([this]()
+                        {
+                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                            if (BaseUrl.IsEmpty())
+                            {
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingBaseUrlCompile", "Enter a backend base URL first."));
+                                }
+                                return FReply::Handled();
+                            }
+
+                            CurrentBackendBaseUrl = BaseUrl;
+                            if (StatusTextPtr.IsValid())
+                            {
+                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusPreparingCompile", "Preparing a compile action for the current project..."));
+                            }
+
+                            EnsureBackendAndSendRequest(
+                                BaseUrl + TEXT("/plugin/tool"),
+                                UE5CopilotAssistant::BuildPluginToolCompilePayload(),
+                                OutputTextBoxPtr,
+                                AgentSessionTextBoxPtr,
+                                CodeDiffPreviewTextBoxPtr,
+                                EditorActionPreviewTextBoxPtr,
+                                BundleApplyTargetPathTextBoxPtr,
+                                &PendingEditorActionJson,
+                                StatusTextPtr
+                            );
+                            return FReply::Handled();
+                        })
+                    ]
 
                     + SHorizontalBox::Slot()
                     .FillWidth(1.0f)
@@ -2774,8 +3227,8 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                             }
 
                             EnsureBackendAndSendRequest(
-                                BaseUrl + TEXT("/plugin/asset-edit-plan"),
-                                UE5CopilotAssistant::BuildPluginAssetEditPlanPayload(SelectionName, SelectionType, AssetPath, ClassName, ChangeRequest),
+                                BaseUrl + TEXT("/plugin/tool"),
+                                UE5CopilotAssistant::BuildPluginToolAssetEditPayload(SelectionName, SelectionType, AssetPath, ClassName, ChangeRequest),
                                 OutputTextBoxPtr,
                                 AgentSessionTextBoxPtr,
                                 CodeDiffPreviewTextBoxPtr,
@@ -2898,8 +3351,8 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                         }
 
                         EnsureBackendAndSendRequest(
-                            BaseUrl + TEXT("/asset-scaffold"),
-                            UE5CopilotAssistant::BuildAssetScaffoldPayload(
+                            BaseUrl + TEXT("/plugin/tool"),
+                            UE5CopilotAssistant::BuildPluginToolAssetScaffoldPayload(
                                 SelectedAssetScaffoldKind.IsValid() ? *SelectedAssetScaffoldKind : FString(TEXT("blueprint_class")),
                                 AssetName,
                                 Purpose,
@@ -2992,11 +3445,11 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 return FReply::Handled();
                             }
 
-                            if (ActionType != TEXT("rename_asset") && ActionType != TEXT("create_asset") && ActionType != TEXT("tweak_material_parameter") && ActionType != TEXT("apply_code_patch_preview") && ActionType != TEXT("apply_code_patch_bundle_preview"))
+                            if (ActionType != TEXT("open_asset") && ActionType != TEXT("compile_project") && ActionType != TEXT("rename_asset") && ActionType != TEXT("create_asset") && ActionType != TEXT("tweak_material_parameter") && ActionType != TEXT("apply_code_patch_preview") && ActionType != TEXT("apply_code_patch_bundle_preview"))
                             {
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(FText::FromString(FString::Printf(TEXT("`%s` previewed successfully, but this plugin only executes `rename_asset`, a small set of safe `create_asset` actions, narrow material-instance parameter tweaks, and narrow single-file code patch previews right now."), *ActionType)));
+                                    StatusTextPtr->SetText(FText::FromString(FString::Printf(TEXT("`%s` previewed successfully, but this plugin only executes `open_asset`, `compile_project`, `rename_asset`, a small set of safe `create_asset` actions, narrow material-instance parameter tweaks, and narrow code patch previews right now."), *ActionType)));
                                 }
                                 return FReply::Handled();
                             }
@@ -3006,8 +3459,331 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                             {
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingRenameArguments", "The rename action is missing its argument payload."));
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingActionArguments", "The previewed action is missing its argument payload."));
                                 }
+                                return FReply::Handled();
+                            }
+
+                            if (ActionType == TEXT("open_asset"))
+                            {
+                                FString TargetAssetPath;
+                                (*ArgumentsObject)->TryGetStringField(TEXT("asset_path"), TargetAssetPath);
+                                if (TargetAssetPath.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotIncompleteOpenAssetArguments", "The open-asset action requires an `asset_path`."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                FString OpenAssetError;
+                                const bool bOpenAssetSucceeded = UE5CopilotAssistant::OpenAssetInEditor(TargetAssetPath, OpenAssetError);
+                                if (bOpenAssetSucceeded)
+                                {
+                                    PendingEditorActionJson.Reset();
+                                }
+                                if (EditorActionPreviewTextBoxPtr.IsValid())
+                                {
+                                    EditorActionPreviewTextBoxPtr->SetText(
+                                        bOpenAssetSucceeded
+                                            ? LOCTEXT("UE5CopilotEditorActionPreviewOpenAssetConsumed", "Asset opened in the editor. No previewed editor action is pending.")
+                                            : LOCTEXT("UE5CopilotEditorActionPreviewOpenAssetFailed", "Open-asset execution failed. Review the status message for details.")
+                                    );
+                                }
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(
+                                        bOpenAssetSucceeded
+                                            ? LOCTEXT("UE5CopilotOpenAssetExecuted", "Asset opened in the Unreal editor.")
+                                            : FText::FromString(OpenAssetError.IsEmpty() ? TEXT("Open-asset execution failed.") : OpenAssetError)
+                                    );
+                                }
+                                return FReply::Handled();
+                            }
+
+                            if (ActionType == TEXT("compile_project"))
+                            {
+                                FString RequestedProjectPath;
+                                FString RequestedTargetName;
+                                FString RequestedPlatform;
+                                FString RequestedConfiguration;
+                                (*ArgumentsObject)->TryGetStringField(TEXT("project_path"), RequestedProjectPath);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("target_name"), RequestedTargetName);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("platform"), RequestedPlatform);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("configuration"), RequestedConfiguration);
+
+                                FString ExecutablePath;
+                                FString CommandArguments;
+                                FString CompileLogPath;
+                                FString ResolvedTargetName;
+                                FString ResolvedPlatform;
+                                FString ResolvedConfiguration;
+                                FString CompileSetupError;
+                                if (!UE5CopilotAssistant::BuildCompileProjectInvocation(
+                                    RequestedProjectPath,
+                                    RequestedTargetName,
+                                    RequestedPlatform,
+                                    RequestedConfiguration,
+                                    ExecutablePath,
+                                    CommandArguments,
+                                    CompileLogPath,
+                                    ResolvedTargetName,
+                                    ResolvedPlatform,
+                                    ResolvedConfiguration,
+                                    CompileSetupError))
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(FText::FromString(CompileSetupError));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                PendingEditorActionJson.Reset();
+                                if (EditorActionPreviewTextBoxPtr.IsValid())
+                                {
+                                    EditorActionPreviewTextBoxPtr->SetText(LOCTEXT("UE5CopilotEditorActionPreviewCompileConsumed", "Compile action started. No previewed editor action is pending."));
+                                }
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotCompileStarted", "Compile started in the background. Waiting for results..."));
+                                }
+                                if (OutputTextBoxPtr.IsValid())
+                                {
+                                    OutputTextBoxPtr->SetText(FText::FromString(FString::Printf(
+                                        TEXT("Compile started.\n\nCommand: \"%s\" %s\n\nLog: %s"),
+                                        *ExecutablePath,
+                                        *CommandArguments,
+                                        *CompileLogPath
+                                    )));
+                                }
+
+                                const FString BackendBaseUrl = CurrentBackendBaseUrl;
+                                const TWeakPtr<SMultiLineEditableTextBox> WeakOutputTextBox = OutputTextBoxPtr;
+                                const TWeakPtr<SMultiLineEditableTextBox> WeakAgentSessionTextBox = AgentSessionTextBoxPtr;
+                                const TWeakPtr<STextBlock> WeakStatusText = StatusTextPtr;
+                                Async(EAsyncExecution::ThreadPool, [ExecutablePath, CommandArguments, CompileLogPath, ResolvedTargetName, ResolvedPlatform, ResolvedConfiguration, BackendBaseUrl, WeakOutputTextBox, WeakAgentSessionTextBox, WeakStatusText]()
+                                {
+                                    int32 ReturnCode = INDEX_NONE;
+                                    FString StdOut;
+                                    FString StdErr;
+                                    FPlatformProcess::ExecProcess(*ExecutablePath, *CommandArguments, &ReturnCode, &StdOut, &StdErr);
+
+                                    FString CombinedOutput = StdOut;
+                                    if (!StdErr.IsEmpty())
+                                    {
+                                        if (!CombinedOutput.IsEmpty())
+                                        {
+                                            CombinedOutput += TEXT("\n");
+                                        }
+                                        CombinedOutput += StdErr;
+                                    }
+                                    if (CombinedOutput.IsEmpty())
+                                    {
+                                        CombinedOutput = TEXT("No build output was captured.");
+                                    }
+
+                                    FFileHelper::SaveStringToFile(CombinedOutput, *CompileLogPath);
+                                    const FString OutputTail = UE5CopilotAssistant::TailLines(CombinedOutput, 40);
+                                    const FString FinalOutput = FString::Printf(
+                                        TEXT("Compile finished with exit code %d.\n\nLog: %s\n\nLast output lines:\n%s"),
+                                        ReturnCode,
+                                        *CompileLogPath,
+                                        *OutputTail
+                                    );
+
+                                    AsyncTask(ENamedThreads::GameThread, [ReturnCode, FinalOutput, OutputTail, CompileLogPath, ResolvedTargetName, ResolvedPlatform, ResolvedConfiguration, BackendBaseUrl, WeakOutputTextBox, WeakAgentSessionTextBox, WeakStatusText]()
+                                    {
+                                        if (const TSharedPtr<SMultiLineEditableTextBox> OutputTextBox = WeakOutputTextBox.Pin())
+                                        {
+                                            OutputTextBox->SetText(FText::FromString(FinalOutput));
+                                        }
+                                        if (const TSharedPtr<STextBlock> StatusText = WeakStatusText.Pin())
+                                        {
+                                            StatusText->SetText(
+                                                ReturnCode == 0
+                                                    ? LOCTEXT("UE5CopilotCompileSucceeded", "Compile completed successfully.")
+                                                    : LOCTEXT("UE5CopilotCompileFailed", "Compile finished with errors. Review the output panel.")
+                                            );
+                                        }
+
+                                        if (BackendBaseUrl.IsEmpty())
+                                        {
+                                            return;
+                                        }
+
+                                        TSharedRef<IHttpRequest, ESPMode::ThreadSafe> CompileReportRequest = FHttpModule::Get().CreateRequest();
+                                        CompileReportRequest->SetURL(BackendBaseUrl + TEXT("/plugin/tool"));
+                                        CompileReportRequest->SetVerb(TEXT("POST"));
+                                        CompileReportRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+                                        CompileReportRequest->SetContentAsString(
+                                            UE5CopilotAssistant::BuildPluginToolCompileResultPayload(
+                                                ReturnCode,
+                                                ResolvedTargetName,
+                                                ResolvedPlatform,
+                                                ResolvedConfiguration,
+                                                CompileLogPath,
+                                                OutputTail
+                                            )
+                                        );
+                                        CompileReportRequest->OnProcessRequestComplete().BindLambda(
+                                            [FinalOutput, WeakOutputTextBox, WeakAgentSessionTextBox, WeakStatusText](FHttpRequestPtr HttpRequest, FHttpResponsePtr HttpResponse, bool bSucceeded)
+                                            {
+                                                if (!bSucceeded || !HttpResponse.IsValid())
+                                                {
+                                                    return;
+                                                }
+
+                                                TSharedPtr<FJsonObject> ResponseObject;
+                                                TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(HttpResponse->GetContentAsString());
+                                                if (!FJsonSerializer::Deserialize(Reader, ResponseObject) || !ResponseObject.IsValid())
+                                                {
+                                                    return;
+                                                }
+
+                                                const TSharedPtr<FJsonObject>* PayloadObject = nullptr;
+                                                if (!ResponseObject->TryGetObjectField(TEXT("payload"), PayloadObject) || !PayloadObject || !PayloadObject->IsValid())
+                                                {
+                                                    return;
+                                                }
+
+                                                FString Diagnosis;
+                                                (*PayloadObject)->TryGetStringField(TEXT("diagnosis"), Diagnosis);
+                                                FString AiAnalysis;
+                                                (*PayloadObject)->TryGetStringField(TEXT("ai_analysis"), AiAnalysis);
+                                                FString FollowupAgentTaskId;
+                                                (*PayloadObject)->TryGetStringField(TEXT("followup_agent_task_id"), FollowupAgentTaskId);
+                                                FString PreferredTargetPath;
+                                                (*PayloadObject)->TryGetStringField(TEXT("preferred_target_path"), PreferredTargetPath);
+
+                                                TArray<FString> NextSteps;
+                                                const TArray<TSharedPtr<FJsonValue>>* NextStepValues = nullptr;
+                                                if ((*PayloadObject)->TryGetArrayField(TEXT("next_steps"), NextStepValues) && NextStepValues)
+                                                {
+                                                    for (const TSharedPtr<FJsonValue>& Value : *NextStepValues)
+                                                    {
+                                                        FString Step = Value.IsValid() ? Value->AsString() : FString();
+                                                        if (!Step.IsEmpty())
+                                                        {
+                                                            NextSteps.Add(FString::Printf(TEXT("- %s"), *Step));
+                                                        }
+                                                    }
+                                                }
+
+                                                FString SuggestedToolPayload;
+                                                FString SuggestedToolSummary;
+                                                const TArray<TSharedPtr<FJsonValue>>* SuggestedInvocationValues = nullptr;
+                                                if ((*PayloadObject)->TryGetArrayField(TEXT("suggested_tool_invocations"), SuggestedInvocationValues)
+                                                    && SuggestedInvocationValues
+                                                    && SuggestedInvocationValues->Num() > 0)
+                                                {
+                                                    const TSharedPtr<FJsonObject> SuggestedInvocationObject =
+                                                        (*SuggestedInvocationValues)[0].IsValid() ? (*SuggestedInvocationValues)[0]->AsObject() : nullptr;
+                                                    if (SuggestedInvocationObject.IsValid())
+                                                    {
+                                                        SuggestedToolPayload = UE5CopilotAssistant::BuildPluginToolPayloadFromSuggestedInvocation(SuggestedInvocationObject);
+                                                        FString ToolName;
+                                                        FString Reason;
+                                                        FString SuggestedTargetPath;
+                                                        SuggestedInvocationObject->TryGetStringField(TEXT("tool_name"), ToolName);
+                                                        SuggestedInvocationObject->TryGetStringField(TEXT("reason"), Reason);
+                                                        const TSharedPtr<FJsonObject>* SuggestedToolArgsObject = nullptr;
+                                                        if (SuggestedInvocationObject->TryGetObjectField(TEXT("tool_args"), SuggestedToolArgsObject)
+                                                            && SuggestedToolArgsObject
+                                                            && SuggestedToolArgsObject->IsValid())
+                                                        {
+                                                            (*SuggestedToolArgsObject)->TryGetStringField(TEXT("target_path"), SuggestedTargetPath);
+                                                        }
+                                                        SuggestedToolSummary = ToolName;
+                                                        if (!SuggestedTargetPath.IsEmpty())
+                                                        {
+                                                            SuggestedToolSummary += FString::Printf(TEXT(" -> %s"), *SuggestedTargetPath);
+                                                        }
+                                                        if (!Reason.IsEmpty())
+                                                        {
+                                                            SuggestedToolSummary += FString::Printf(TEXT(" (%s)"), *Reason);
+                                                        }
+                                                    }
+                                                }
+
+                                                const TSharedPtr<FJsonObject>* FollowupAgentSessionObject = nullptr;
+                                                FString AgentSessionPreview = TEXT("No live agent session yet.");
+                                                if ((*PayloadObject)->TryGetObjectField(TEXT("followup_agent_session"), FollowupAgentSessionObject)
+                                                    && FollowupAgentSessionObject
+                                                    && FollowupAgentSessionObject->IsValid())
+                                                {
+                                                    AgentSessionPreview = UE5CopilotAssistant::FormatAgentSessionPreview(*FollowupAgentSessionObject);
+                                                }
+
+                                                FString AugmentedOutput = FinalOutput;
+                                                if (!Diagnosis.IsEmpty() || !AiAnalysis.IsEmpty() || NextSteps.Num() > 0)
+                                                {
+                                                    AugmentedOutput += TEXT("\n\nBackend Diagnosis:\n");
+                                                    if (!Diagnosis.IsEmpty())
+                                                    {
+                                                        AugmentedOutput += Diagnosis;
+                                                    }
+                                                    if (!AiAnalysis.IsEmpty())
+                                                    {
+                                                        if (!Diagnosis.IsEmpty())
+                                                        {
+                                                            AugmentedOutput += TEXT("\n\n");
+                                                        }
+                                                        AugmentedOutput += AiAnalysis;
+                                                    }
+                                                    if (NextSteps.Num() > 0)
+                                                    {
+                                                        AugmentedOutput += TEXT("\n\nNext Steps:\n");
+                                                        AugmentedOutput += UE5CopilotAssistant::JoinLines(NextSteps);
+                                                    }
+                                                }
+
+                                                if (const TSharedPtr<SMultiLineEditableTextBox> OutputTextBox = WeakOutputTextBox.Pin())
+                                                {
+                                                    OutputTextBox->SetText(FText::FromString(AugmentedOutput));
+                                                }
+                                                if (const TSharedPtr<SMultiLineEditableTextBox> AgentSessionTextBox = WeakAgentSessionTextBox.Pin())
+                                                {
+                                                    AgentSessionTextBox->SetText(FText::FromString(AgentSessionPreview));
+                                                }
+                                                if (!FollowupAgentTaskId.IsEmpty())
+                                                {
+                                                    if (FUE5CopilotAssistantModule* Module = FModuleManager::GetModulePtr<FUE5CopilotAssistantModule>(TEXT("UE5CopilotAssistant")))
+                                                    {
+                                                        Module->SetCurrentAgentTaskId(FollowupAgentTaskId);
+                                                    }
+                                                }
+                                                if (FUE5CopilotAssistantModule* Module = FModuleManager::GetModulePtr<FUE5CopilotAssistantModule>(TEXT("UE5CopilotAssistant")))
+                                                {
+                                                    if (!PreferredTargetPath.IsEmpty())
+                                                    {
+                                                        Module->SetPreferredCodeTargetPath(PreferredTargetPath);
+                                                    }
+                                                    if (!SuggestedToolPayload.IsEmpty())
+                                                    {
+                                                        Module->SetPendingSuggestedToolRequest(SuggestedToolPayload, SuggestedToolSummary);
+                                                    }
+                                                    else
+                                                    {
+                                                        Module->ClearPendingSuggestedToolRequest();
+                                                    }
+                                                }
+                                                if (const TSharedPtr<STextBlock> StatusText = WeakStatusText.Pin())
+                                                {
+                                                    StatusText->SetText(
+                                                        HttpResponse->GetResponseCode() >= 400
+                                                            ? LOCTEXT("UE5CopilotCompileAnalysisUnavailable", "Compile finished. Backend diagnosis was unavailable.")
+                                                            : (!FollowupAgentTaskId.IsEmpty()
+                                                                ? LOCTEXT("UE5CopilotCompileAnalysisAndAgentReady", "Compile finished, backend diagnosis is ready, and a follow-up agent session has started.")
+                                                                : LOCTEXT("UE5CopilotCompileAnalysisReady", "Compile finished and backend diagnosis is ready."))
+                                                    );
+                                                }
+                                            }
+                                        );
+                                        CompileReportRequest->ProcessRequest();
+                                    });
+                                });
                                 return FReply::Handled();
                             }
 
@@ -3444,6 +4220,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                         {
                             CurrentAgentTaskId.Reset();
                             PendingEditorActionJson.Reset();
+                            ClearPendingSuggestedToolRequest();
                             ClearPendingCodePatchBundleTargets();
                             if (CodeDiffPreviewTextBoxPtr.IsValid())
                             {
@@ -3635,6 +4412,63 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                         .AutoHeight()
                         .Padding(0.0f, 0.0f, 0.0f, 6.0f)
                         [
+                            SAssignNew(SuggestedFollowupToolTextPtr, STextBlock)
+                            .Text(LOCTEXT("UE5CopilotSuggestedFollowupNone", "Suggested follow-up: none"))
+                            .AutoWrapText(true)
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(SButton)
+                            .Text(LOCTEXT("UE5CopilotRunSuggestedFollowup", "Run Suggested Follow-Up"))
+                            .ToolTipText(LOCTEXT("UE5CopilotRunSuggestedFollowupTooltip", "Run the first backend-suggested follow-up tool from the latest compile diagnosis."))
+                            .OnClicked_Lambda([this]()
+                            {
+                                const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : CurrentBackendBaseUrl);
+                                if (BaseUrl.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingBaseUrlSuggestedFollowup", "Enter a backend base URL first."));
+                                    }
+                                    return FReply::Handled();
+                                }
+                                if (PendingSuggestedToolRequestJson.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotNoSuggestedFollowup", "There is no suggested follow-up tool ready right now."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                CurrentBackendBaseUrl = BaseUrl;
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotRunningSuggestedFollowup", "Running the suggested follow-up tool..."));
+                                }
+
+                                EnsureBackendAndSendRequest(
+                                    BaseUrl + TEXT("/plugin/tool"),
+                                    PendingSuggestedToolRequestJson,
+                                    OutputTextBoxPtr,
+                                    AgentSessionTextBoxPtr,
+                                    CodeDiffPreviewTextBoxPtr,
+                                    EditorActionPreviewTextBoxPtr,
+                                    BundleApplyTargetPathTextBoxPtr,
+                                    &PendingEditorActionJson,
+                                    StatusTextPtr
+                                );
+                                return FReply::Handled();
+                            })
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
                             SNew(STextBlock)
                             .Text(LOCTEXT("UE5CopilotCodeDiffPreviewHeader", "Code Diff Preview"))
                             .Font(FAppStyle::GetFontStyle("BoldFont"))
@@ -3683,6 +4517,30 @@ void FUE5CopilotAssistantModule::SetCurrentAgentTaskId(const FString& TaskId)
 void FUE5CopilotAssistantModule::ClearCurrentAgentTaskId()
 {
     CurrentAgentTaskId.Reset();
+}
+
+void FUE5CopilotAssistantModule::SetPendingSuggestedToolRequest(const FString& Payload, const FString& Summary)
+{
+    PendingSuggestedToolRequestJson = Payload;
+    PendingSuggestedToolSummary = Summary;
+    if (SuggestedFollowupToolTextPtr.IsValid())
+    {
+        SuggestedFollowupToolTextPtr->SetText(
+            PendingSuggestedToolSummary.IsEmpty()
+                ? LOCTEXT("UE5CopilotSuggestedFollowupNone", "Suggested follow-up: none")
+                : FText::FromString(FString::Printf(TEXT("Suggested follow-up: %s"), *PendingSuggestedToolSummary))
+        );
+    }
+}
+
+void FUE5CopilotAssistantModule::ClearPendingSuggestedToolRequest()
+{
+    PendingSuggestedToolRequestJson.Reset();
+    PendingSuggestedToolSummary.Reset();
+    if (SuggestedFollowupToolTextPtr.IsValid())
+    {
+        SuggestedFollowupToolTextPtr->SetText(LOCTEXT("UE5CopilotSuggestedFollowupNone", "Suggested follow-up: none"));
+    }
 }
 
 #undef LOCTEXT_NAMESPACE

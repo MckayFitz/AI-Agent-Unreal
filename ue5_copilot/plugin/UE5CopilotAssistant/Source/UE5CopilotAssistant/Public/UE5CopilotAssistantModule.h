@@ -12,8 +12,11 @@ public:
     virtual void ShutdownModule() override;
     void RefreshPendingCodePatchBundleTargets(const TArray<FString>& TargetPaths, const FString& PreferredTargetPath = FString());
     void ClearPendingCodePatchBundleTargets();
+    void SetPreferredCodeTargetPath(const FString& TargetPath);
     void SetCurrentAgentTaskId(const FString& TaskId);
     void ClearCurrentAgentTaskId();
+    void SetPendingSuggestedToolRequest(const FString& Payload, const FString& Summary);
+    void ClearPendingSuggestedToolRequest();
 
 private:
     bool StartBackendProcess(FString& OutError);
@@ -54,6 +57,7 @@ private:
     TSharedPtr<class SMultiLineEditableTextBox> AgentSessionTextBoxPtr;
     TSharedPtr<class SMultiLineEditableTextBox> CodeDiffPreviewTextBoxPtr;
     TSharedPtr<class SMultiLineEditableTextBox> EditorActionPreviewTextBoxPtr;
+    TSharedPtr<class STextBlock> SuggestedFollowupToolTextPtr;
     TSharedPtr<class STextBlock> StatusTextPtr;
     TSharedPtr<class STextBlock> SelectionPreviewTextPtr;
     TArray<TSharedPtr<FString>> DeepAssetKinds;
@@ -64,5 +68,7 @@ private:
     TSharedPtr<FString> SelectedPendingCodePatchBundleTarget;
     FString CurrentAgentTaskId;
     FString PendingEditorActionJson;
+    FString PendingSuggestedToolRequestJson;
+    FString PendingSuggestedToolSummary;
     bool bBackendStartupInProgress = false;
 };

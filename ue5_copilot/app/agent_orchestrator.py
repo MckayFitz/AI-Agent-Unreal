@@ -31,6 +31,11 @@ class AgentToolSpec:
     build_input: ToolInputBuilder
     run: ToolRunner
     can_run: AvailabilityRule
+    execution_target: str = "backend_orchestrator"
+    mutates_project: bool = False
+    capability_tags: tuple[str, ...] = ()
+    backend_route: str | None = None
+    editor_action_types: tuple[str, ...] = ()
     planner_task_types: tuple[str, ...] = ()
     planner_when_resumed: bool = False
     planner_when_approved: bool = False
@@ -572,6 +577,11 @@ def build_tool_catalog() -> list[dict[str, Any]]:
             "safety_level": tool.safety_level,
             "requires_confirmation": tool.requires_confirmation,
             "safe_to_autorun": tool.safe_to_autorun,
+            "execution_target": tool.execution_target,
+            "mutates_project": tool.mutates_project,
+            "capability_tags": list(tool.capability_tags),
+            "backend_route": tool.backend_route,
+            "editor_action_types": list(tool.editor_action_types),
         }
         for tool in TOOL_SPECS
     ]
@@ -765,6 +775,8 @@ def tool_plan_task(session: Session, tool_input: dict[str, Any]) -> dict[str, An
         "candidate_files": [item.get("path") for item in plan.get("candidate_files", [])[:4]],
         "candidate_assets": [item.get("name") for item in plan.get("candidate_assets", [])[:4]],
         "suggested_backend_routes": plan.get("suggested_backend_routes", []),
+        "recommended_tool_chain": plan.get("recommended_tool_chain", []),
+        "unreal_tool_catalog": deepcopy(plan.get("unreal_tool_catalog", [])),
         "tool_preferences": deepcopy(plan.get("tool_preferences", {})),
         "proposed_tools": [item.get("tool_name") for item in session["subtasks"]],
     }
@@ -1456,6 +1468,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="backend_orchestrator",
+        capability_tags=("project", "context", "inventory"),
         build_input=build_tool_input_from_goal,
         run=tool_inspect_project_context,
         can_run=can_run_inspect_project_context,
@@ -1469,6 +1483,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="backend_orchestrator",
+        capability_tags=("planning", "routing", "tool-selection"),
         build_input=build_tool_input_from_goal,
         run=tool_plan_task,
         can_run=can_run_plan_task,
@@ -1482,6 +1498,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="backend_orchestrator",
+        capability_tags=("search", "symbols", "ownership"),
         build_input=build_search_input,
         run=tool_search_project,
         can_run=can_run_search_project,
@@ -1495,6 +1513,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="backend_orchestrator",
+        capability_tags=("read", "files", "context"),
         build_input=build_read_file_input,
         run=tool_read_file_context,
         can_run=can_run_read_file_context,
@@ -1508,6 +1528,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="backend_orchestrator",
+        capability_tags=("selection", "asset", "ownership"),
         build_input=build_analyze_selection_input,
         run=tool_analyze_selection,
         can_run=can_run_analyze_selection,
@@ -1521,6 +1543,9 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="backend_orchestrator",
+        capability_tags=("asset", "plan", "followup"),
+        editor_action_types=("create_asset",),
         build_input=build_asset_plan_input,
         run=tool_draft_asset_plan,
         can_run=can_run_draft_asset_plan,
@@ -1534,6 +1559,9 @@ TOOL_SPECS = [
         safety_level="preview_only",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="backend_orchestrator",
+        capability_tags=("code", "preview", "multi-file"),
+        editor_action_types=("apply_code_patch_bundle_preview",),
         build_input=build_code_patch_input,
         run=tool_draft_code_patch_bundle,
         can_run=can_run_draft_code_patch_bundle,
@@ -1547,6 +1575,7 @@ TOOL_SPECS = [
         safety_level="confirmation_required",
         requires_confirmation=True,
         safe_to_autorun=False,
+        execution_target="user_confirmation",
         build_input=build_confirmation_input,
         run=tool_request_confirmation,
         can_run=can_run_request_confirmation,
@@ -1560,6 +1589,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="editor_handoff",
+        capability_tags=("handoff", "editor", "execution-package"),
         build_input=build_execution_package_input,
         run=tool_stage_editor_execution_package,
         can_run=can_run_stage_editor_execution_package,
@@ -1573,6 +1604,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="editor_handoff",
+        capability_tags=("handoff", "preview", "dry-run"),
         build_input=build_editor_execution_artifact_input,
         run=tool_stage_apply_ready_preview,
         can_run=can_run_stage_apply_ready_preview,
@@ -1586,6 +1619,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="editor_handoff",
+        capability_tags=("validation", "compile", "editor"),
         build_input=build_editor_execution_artifact_input,
         run=tool_stage_validation_commands,
         can_run=can_run_stage_validation_commands,
@@ -1599,6 +1634,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="editor_handoff",
+        capability_tags=("handoff", "editor", "resume"),
         build_input=build_resume_input,
         run=tool_prepare_editor_handoff,
         can_run=can_run_prepare_editor_handoff,
@@ -1612,6 +1649,9 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="editor_handoff",
+        capability_tags=("asset", "scaffold", "followup"),
+        editor_action_types=("create_asset",),
         build_input=lambda session: {},
         run=tool_draft_supporting_asset_scaffolds,
         can_run=can_run_draft_supporting_asset_scaffolds,
@@ -1625,6 +1665,8 @@ TOOL_SPECS = [
         safety_level="safe",
         requires_confirmation=False,
         safe_to_autorun=True,
+        execution_target="backend_orchestrator",
+        capability_tags=("reporting", "progress"),
         build_input=build_progress_input,
         run=tool_summarize_progress,
         can_run=can_run_summarize_progress,

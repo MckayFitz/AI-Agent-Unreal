@@ -28,6 +28,7 @@ from app.code_patch_bundle_verification import (
     build_code_patch_bundle_verification_token,
 )
 from app.task_orchestrator import build_agent_task_plan
+from app.task_orchestrator import build_unreal_tool_catalog, infer_confirmation_policy
 from app.agent_runner import (
     start_agent_task_session,
     confirm_agent_task_session,
@@ -35,7 +36,7 @@ from app.agent_runner import (
     step_agent_task_session,
     confirm_and_continue_agent_task_session,
 )
-from app.agent_orchestrator import refresh_orchestration_state
+from app.agent_orchestrator import refresh_orchestration_state, build_tool_catalog
 from app.prompts import (
     CRASH_LOG_SYSTEM_PROMPT,
     DEEP_ASSET_ANALYSIS_SYSTEM_PROMPT,
@@ -406,6 +407,19 @@ def agent_task(request: AgentTaskRequest):
 
     remember_interaction(goal, plan.get("ai_plan") or plan["summary"])
     return plan
+
+
+@app.get("/agent-tools")
+def agent_tools():
+    analysis = PROJECT_CACHE.get("analysis") or {}
+    assets = analysis.get("assets", [])
+    return {
+        "agent_profile": "tool_using_agent",
+        "execution_mode": "tool_catalog",
+        "orchestration_tools": build_tool_catalog(),
+        "unreal_tool_catalog": build_unreal_tool_catalog(task_type="task_plan", candidate_assets=assets),
+        "confirmation_policy": infer_confirmation_policy("task_plan"),
+    }
 
 
 @app.post("/agent-session")
@@ -3174,6 +3188,11 @@ app.include_router(build_plugin_router({
     "include_ai_summary": lambda: bool(os.getenv("OPENAI_API_KEY")),
     "summarize_specialized_assets": summarize_specialized_assets,
     "summarize_deep_asset_with_llm": summarize_deep_asset_with_llm,
+    "find_references": find_references,
+    "build_code_patch_bundle_draft": build_code_patch_bundle_draft,
+    "build_orchestration_tool_catalog": build_tool_catalog,
+    "build_unreal_tool_catalog": build_unreal_tool_catalog,
+    "infer_confirmation_policy": infer_confirmation_policy,
     "looks_like_rename_request": looks_like_rename_request,
     "looks_like_function_request": looks_like_function_request,
     "build_asset_rename_edit_plan": build_asset_rename_edit_plan,

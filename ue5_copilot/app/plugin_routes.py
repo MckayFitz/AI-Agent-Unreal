@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -52,6 +53,18 @@ class DeepAssetAnalysisRequest(BaseModel):
     source: str | None = None
 
 
+class PluginToolCommandRequest(BaseModel):
+    tool_name: str
+    selection_name: str | None = None
+    selection_type: str | None = None
+    asset_path: str | None = None
+    class_name: str | None = None
+    project_path: str | None = None
+    source: str | None = None
+    exported_text: str | None = None
+    tool_args: dict | None = None
+
+
 SCAFFOLD_ALIASES = {
     "blueprint": "blueprint_class",
     "blueprint_class": "blueprint_class",
@@ -96,6 +109,93 @@ SCAFFOLD_ALIASES = {
 
 def build_plugin_router(deps):
     router = APIRouter()
+
+    def make_tool_response(*, tool_name: str, status: str, message: str, payload=None, editor_action=None):
+        response = {
+            "tool_name": tool_name,
+            "status": status,
+            "message": message,
+            "payload": payload or {},
+        }
+        if editor_action:
+            response["editor_action"] = editor_action
+        return response
+
+    def infer_compile_error_symbol(error_line: str) -> str:
+        text = (error_line or "").strip()
+        if not text:
+            return ""
+
+        symbol_patterns = [
+            r"'([A-Za-z_][A-Za-z0-9_:]*)'",
+            r'"([A-Za-z_][A-Za-z0-9_:]*)"',
+            r"\b([AUFISE]?[A-Z][A-Za-z0-9_]+(?:\:\:[A-Za-z_][A-Za-z0-9_]*)?)\b",
+        ]
+        for pattern in symbol_patterns:
+            matches = re.findall(pattern, text)
+            for match in matches:
+                cleaned = (match or "").strip(":")
+                lowered = cleaned.lower()
+                if lowered in {"error", "warning", "fatal", "build", "failed", "development", "win64"}:
+                    continue
+                return cleaned
+        return ""
+
+    def build_compile_followup_plan(
+        *,
+        exit_code: int,
+        diagnosis: str,
+        error_lines: list[str],
+        file_hints: list[str],
+        target_name: str,
+        configuration: str,
+        platform: str,
+    ) -> dict:
+        if exit_code == 0:
+            return {
+                "suggested_tool_invocations": [],
+                "suggested_agent_goal": "",
+            }
+
+        first_error = error_lines[0] if error_lines else diagnosis
+        lead_file = file_hints[0] if file_hints else ""
+        lead_symbol = infer_compile_error_symbol(first_error)
+
+        suggested_tool_invocations = []
+        if lead_file:
+            suggested_tool_invocations.append(
+                {
+                    "tool_name": "plan_code_changes",
+                    "tool_args": {
+                        "goal": f"Fix the compile error in {lead_file}: {first_error}",
+                        "target_path": lead_file,
+                    },
+                    "reason": f"Draft a narrow code patch plan centered on `{lead_file}` and the first compile error.",
+                }
+            )
+        if lead_symbol:
+            suggested_tool_invocations.append(
+                {
+                    "tool_name": "search_project_symbols",
+                    "tool_args": {"symbol": lead_symbol},
+                    "reason": f"Search for `{lead_symbol}` to find the owner and nearby call sites behind the first compile error.",
+                }
+            )
+
+        goal_parts = [
+            "fix the Unreal compile error",
+            f"in {lead_file}" if lead_file else "",
+            f"for {lead_symbol}" if lead_symbol else "",
+            f"first error: {first_error}" if first_error else "",
+            f"target {target_name}" if target_name else "",
+            f"{configuration} {platform}".strip() if configuration or platform else "",
+        ]
+        suggested_agent_goal = " ".join(part for part in goal_parts if part).strip()
+        return {
+            "preferred_target_path": lead_file,
+            "suggested_tool_invocations": suggested_tool_invocations,
+            "suggested_agent_goal": suggested_agent_goal,
+        }
 
     def ensure_project_loaded(request_project_path: str | None = None):
         requested_project_path = (request_project_path or "").strip()
@@ -524,6 +624,424 @@ Relevant project files:
             "session": session,
         }
 
+    def dispatch_plugin_tool(request: PluginToolCommandRequest):
+        tool_name = (request.tool_name or "").strip()
+        if not tool_name:
+            return make_tool_response(
+                tool_name="",
+                status="error",
+                message="Choose a tool first.",
+            )
+
+        if tool_name == "tool_catalog":
+            analysis = deps["project_cache"].get("analysis") or {}
+            candidate_assets = analysis.get("assets", [])
+            payload = {
+                "agent_profile": "tool_using_agent",
+                "orchestration_tools": deps["build_orchestration_tool_catalog"](),
+                "unreal_tool_catalog": deps["build_unreal_tool_catalog"](
+                    task_type="task_plan",
+                    candidate_assets=candidate_assets,
+                ),
+                "confirmation_policy": deps["infer_confirmation_policy"]("task_plan"),
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message="Loaded the current agent and Unreal tool catalogs.",
+                payload=payload,
+            )
+
+        ensure_result = ensure_project_loaded(request.project_path)
+        if ensure_result and "error" in ensure_result:
+            return make_tool_response(
+                tool_name=tool_name,
+                status="error",
+                message=ensure_result["error"],
+            )
+
+        analysis = deps["project_cache"].get("analysis")
+        if not analysis:
+            return make_tool_response(
+                tool_name=tool_name,
+                status="error",
+                message="No project has been scanned yet.",
+            )
+
+        selection_name = (request.selection_name or "").strip()
+        selection_type = (request.selection_type or "").strip()
+        asset_path = (request.asset_path or "").strip()
+        class_name = (request.class_name or "").strip()
+        tool_args = request.tool_args or {}
+
+        if tool_name == "read_current_selection":
+            lookup_terms = [term for term in [selection_name, class_name, asset_path] if term]
+            if not lookup_terms:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="The plugin did not send enough selection information.",
+                )
+            primary_term = selection_name or class_name or asset_path
+            base_result = deps["selection_analysis"](deps["selection_request_class"](selection=primary_term))
+            specialized_summary = deps["run_asset_action"](
+                "plugin_specialized_family",
+                analysis=analysis,
+                selection_name=selection_name,
+                class_name=class_name,
+                asset_path=asset_path,
+            )
+            matched_files = deps["search_files"](
+                analysis["files"],
+                " ".join(lookup_terms),
+                max_results=6,
+                index_data=deps["project_cache"]["search_index"],
+            )
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message="Read the current Unreal selection and resolved the strongest related context.",
+                payload={
+                    "selection_name": selection_name,
+                    "selection_type": selection_type,
+                    "asset_path": asset_path,
+                    "class_name": class_name,
+                    "selection_analysis": base_result,
+                    "matched_files": matched_files,
+                    "specialized_family": specialized_summary,
+                },
+            )
+
+        if tool_name == "inspect_asset_metadata":
+            payload = deps["run_asset_action"](
+                "plugin_asset_details",
+                analysis=analysis,
+                selection_name=selection_name,
+                asset_path=asset_path,
+                class_name=class_name,
+                source=request.source or "plugin_tool",
+            )
+            if payload.get("error"):
+                return make_tool_response(tool_name=tool_name, status="error", message=payload["error"])
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message="Inspected asset metadata and linked ownership details.",
+                payload=payload,
+            )
+
+        if tool_name == "open_asset_in_editor":
+            if not asset_path:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Opening an asset requires an asset_path.",
+                )
+            payload = {
+                "selection_name": selection_name,
+                "asset_path": asset_path,
+                "class_name": class_name,
+            }
+            editor_action = {
+                "action_type": "open_asset",
+                "dry_run": False,
+                "requires_user_confirmation": False,
+                "arguments": {
+                    "asset_path": asset_path,
+                    "selection_name": selection_name,
+                },
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=f"Prepared an editor action to open `{selection_name or asset_path}`.",
+                payload=payload,
+                editor_action=editor_action,
+            )
+
+        if tool_name == "compile_project_and_surface_errors":
+            target_name = str(tool_args.get("target_name", "")).strip()
+            configuration = str(tool_args.get("configuration", "Development")).strip() or "Development"
+            platform = str(tool_args.get("platform", "Win64")).strip() or "Win64"
+            payload = {
+                "project_path": request.project_path or deps["project_cache"].get("project_path"),
+                "target_name": target_name,
+                "configuration": configuration,
+                "platform": platform,
+            }
+            editor_action = {
+                "action_type": "compile_project",
+                "dry_run": False,
+                "requires_user_confirmation": False,
+                "arguments": payload,
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message="Prepared a compile action for the current Unreal project.",
+                payload=payload,
+                editor_action=editor_action,
+            )
+
+        if tool_name == "report_compile_result":
+            exit_code = int(tool_args.get("exit_code", -1))
+            output_text = str(tool_args.get("output_text", ""))
+            log_path = str(tool_args.get("log_path", "")).strip()
+            target_name = str(tool_args.get("target_name", "")).strip()
+            configuration = str(tool_args.get("configuration", "")).strip()
+            platform = str(tool_args.get("platform", "")).strip()
+            auto_start_agent_session = bool(tool_args.get("auto_start_agent_session", False))
+
+            lines = [line.strip() for line in output_text.splitlines() if line.strip()]
+            error_lines = [
+                line for line in lines
+                if any(token in line.lower() for token in (" error ", ": error", "fatal error", "unresolved external", "failed", "exception"))
+            ]
+            warning_lines = [
+                line for line in lines
+                if any(token in line.lower() for token in (" warning ", ": warning"))
+            ]
+            file_hints = []
+            for line in lines:
+                matches = re.findall(r"([A-Za-z0-9_./\\\\-]+\.(?:h|hpp|cpp|cs))", line)
+                file_hints.extend(matches)
+            deduped_file_hints = []
+            seen_files = set()
+            for hint in file_hints:
+                normalized_hint = hint.replace("\\", "/")
+                if normalized_hint in seen_files:
+                    continue
+                seen_files.add(normalized_hint)
+                deduped_file_hints.append(normalized_hint)
+
+            diagnosis = (
+                "Compile completed successfully."
+                if exit_code == 0
+                else "Compile failed. Start with the first real compiler error before chasing follow-on messages."
+            )
+            if error_lines:
+                diagnosis = error_lines[0]
+
+            next_steps = []
+            if exit_code == 0:
+                next_steps.append("Run the affected gameplay or editor flow next to confirm behavior, not just compilation.")
+            else:
+                next_steps.append("Fix the first compiler error in the log, then rebuild before addressing later errors.")
+                if deduped_file_hints:
+                    next_steps.append(f"Check the referenced file first: {deduped_file_hints[0]}")
+                if not error_lines:
+                    next_steps.append("Open the full compile log to find the first concrete error line.")
+
+            payload = {
+                "exit_code": exit_code,
+                "target_name": target_name,
+                "configuration": configuration,
+                "platform": platform,
+                "log_path": log_path,
+                "diagnosis": diagnosis,
+                "error_lines": error_lines[:8],
+                "warning_lines": warning_lines[:8],
+                "file_hints": deduped_file_hints[:8],
+                "next_steps": next_steps,
+            }
+
+            followup_plan = build_compile_followup_plan(
+                exit_code=exit_code,
+                diagnosis=diagnosis,
+                error_lines=error_lines[:8],
+                file_hints=deduped_file_hints[:8],
+                target_name=target_name,
+                configuration=configuration,
+                platform=platform,
+            )
+            payload.update(followup_plan)
+
+            suggested_agent_goal = payload.get("suggested_agent_goal", "")
+            if auto_start_agent_session and exit_code != 0 and suggested_agent_goal:
+                agent_session_payload = build_plugin_agent_session(suggested_agent_goal)
+                payload["followup_agent_session"] = agent_session_payload
+                payload["followup_agent_task_id"] = agent_session_payload.get("task_id")
+                next_steps.insert(0, "A follow-up agent session was started automatically from the first compile error.")
+
+            if deps["include_ai_summary"]() and output_text.strip() and "client" in deps:
+                try:
+                    response = deps["client"].chat.completions.create(
+                        model="gpt-4.1-mini",
+                        messages=[
+                            {"role": "system", "content": "You are a practical Unreal Engine 5 build debugging assistant."},
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Summarize this Unreal compile result in 3 parts: likely cause, likely file/module, and next fix step.\n\n"
+                                    f"Exit code: {exit_code}\n"
+                                    f"Target: {target_name or 'Unknown'}\n"
+                                    f"Configuration: {configuration or 'Unknown'}\n"
+                                    f"Platform: {platform or 'Unknown'}\n\n"
+                                    f"Log tail:\n{output_text[:6000]}"
+                                ),
+                            },
+                        ],
+                    )
+                    payload["ai_analysis"] = (response.choices[0].message.content or "").strip()
+                except Exception:
+                    pass
+
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok" if exit_code == 0 else "error",
+                message=diagnosis,
+                payload=payload,
+            )
+
+        if tool_name == "extract_blueprint_graph_state":
+            payload = deps["run_asset_action"](
+                "asset_deep_analysis",
+                analysis=analysis,
+                asset_kind=str(tool_args.get("asset_kind", "")),
+                exported_text=request.exported_text or "",
+                selection_name=selection_name,
+                class_name=class_name,
+                asset_path=asset_path,
+                source=request.source or "plugin_tool",
+                include_ai_summary=deps["include_ai_summary"](),
+                summarize_with_llm=deps["summarize_deep_asset_with_llm"],
+            )
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok" if not payload.get("error") else "error",
+                message=payload.get("summary", payload.get("error", "Analyzed exported graph/state text.")),
+                payload=payload if not payload.get("error") else {},
+            )
+
+        if tool_name == "search_project_symbols":
+            symbol = str(tool_args.get("symbol") or tool_args.get("query") or selection_name or class_name).strip()
+            if not symbol:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Provide a symbol, asset name, or query first.",
+                )
+            payload = deps["find_references"](analysis["files"], symbol)
+            payload = {
+                "symbol": symbol,
+                "asset_matches": [
+                    asset for asset in deps["project_cache"]["assets"]
+                    if symbol.lower() in asset["name"].lower() or symbol.lower() in asset["path"].lower()
+                ][:12],
+                **payload,
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=f"Searched project symbols and references for `{symbol}`.",
+                payload=payload,
+            )
+
+        if tool_name == "scan_project_context":
+            payload = {
+                "project_path": deps["project_cache"].get("project_path"),
+                "file_count": len(deps["project_cache"].get("files") or []),
+                "asset_count": len(deps["project_cache"].get("assets") or []),
+                "indexed_terms": len((deps["project_cache"].get("search_index") or {}).get("postings", {})),
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message="Project context is scanned and ready for tool use.",
+                payload=payload,
+            )
+
+        if tool_name == "plan_asset_creation":
+            scaffold_request = AssetScaffoldRequest(
+                asset_kind=str(tool_args.get("asset_kind", "")),
+                name=str(tool_args.get("name", "")),
+                purpose=str(tool_args.get("purpose", "")),
+                class_name=str(tool_args.get("class_name", "")),
+            )
+            payload = build_asset_scaffold_response(scaffold_request)
+            if payload.get("error"):
+                return make_tool_response(tool_name=tool_name, status="error", message=payload["error"])
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=f"Prepared a scaffold plan for `{payload.get('recommended_asset_name', '')}`.",
+                payload=payload,
+                editor_action=payload.get("editor_action"),
+            )
+
+        if tool_name == "plan_asset_edits":
+            selection = (selection_name or asset_path or class_name).strip()
+            change_request = str(tool_args.get("change_request", "")).strip()
+            if not selection or not change_request:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Asset edit planning requires both a selection and a change_request.",
+                )
+            payload = build_asset_edit_plan_response(selection=selection, change_request=change_request)
+            if payload.get("error"):
+                return make_tool_response(tool_name=tool_name, status="error", message=payload["error"])
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message="Prepared a safe asset edit plan.",
+                payload=payload,
+                editor_action=payload.get("editor_action"),
+            )
+
+        if tool_name == "plan_code_changes":
+            goal = str(tool_args.get("goal", "")).strip()
+            target_path = str(tool_args.get("target_path", "")).strip()
+            if not goal:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Code planning requires a goal.",
+                )
+            matched_files = deps["search_files"](
+                analysis["files"],
+                " ".join(part for part in [goal, target_path] if part),
+                max_results=8,
+                index_data=deps["project_cache"]["search_index"],
+            )
+            payload = deps["build_code_patch_bundle_draft"](
+                goal=goal,
+                files=analysis["files"],
+                matched_files=matched_files,
+                target_path=target_path,
+            )
+            if target_path and not payload.get("preferred_target_path"):
+                payload["preferred_target_path"] = target_path
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=payload.get("summary", "Prepared a preview-only code bundle."),
+                payload=payload,
+                editor_action=payload.get("editor_action"),
+            )
+
+        if tool_name == "start_agent_session":
+            goal = str(tool_args.get("goal", "")).strip()
+            if not goal:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Starting an agent session requires a goal.",
+                )
+            payload = build_plugin_agent_session(goal)
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=payload.get("answer", "Started an agent session."),
+                payload=payload,
+            )
+
+        return make_tool_response(
+            tool_name=tool_name,
+            status="unsupported",
+            message=f"The tool `{tool_name}` is not mapped yet.",
+        )
+
     def build_chat_answer(message: str, selection_name: str, asset_type: str, asset_path: str, class_name: str, matched_files):
         files = deps["project_cache"]["files"]
         if not files:
@@ -781,6 +1299,10 @@ Relevant project context:
         answer = build_chat_answer(message, selection_name, selection_type, asset_path, class_name, matched_files)
         answer["intent"] = intent
         return answer
+
+    @router.post("/plugin/tool")
+    def plugin_tool(request: PluginToolCommandRequest):
+        return dispatch_plugin_tool(request)
 
     @router.post("/asset-deep-analysis")
     def asset_deep_analysis(request: DeepAssetAnalysisRequest):

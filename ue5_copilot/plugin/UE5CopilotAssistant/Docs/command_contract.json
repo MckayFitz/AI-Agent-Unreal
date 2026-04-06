@@ -34,6 +34,28 @@
   },
   "commands": [
     {
+      "name": "tool_catalog",
+      "direction": "plugin_to_backend",
+      "description": "Fetch the backend's current orchestration tools and Unreal editor capability catalog before starting a task.",
+      "payload_schema": {},
+      "mapped_backend_route": "/agent-tools"
+    },
+    {
+      "name": "plugin_tool",
+      "direction": "plugin_to_backend",
+      "description": "Dispatch a concrete Unreal-oriented tool request through one normalized backend route.",
+      "payload_schema": {
+        "tool_name": "tool_catalog|read_current_selection|open_asset_in_editor|inspect_asset_metadata|extract_blueprint_graph_state|search_project_symbols|scan_project_context|plan_asset_creation|plan_asset_edits|plan_code_changes|compile_project_and_surface_errors|report_compile_result|start_agent_session",
+        "selection_name": "string",
+        "selection_type": "string",
+        "asset_path": "string",
+        "class_name": "string",
+        "exported_text": "string",
+        "tool_args": {}
+      },
+      "mapped_backend_route": "/plugin/tool"
+    },
+    {
       "name": "plugin_chat",
       "direction": "plugin_to_backend",
       "description": "Primary plugin request path for free-form questions and broader implementation goals. The backend may answer directly, return a single plan, or start a live agent session.",
@@ -117,7 +139,7 @@
       "direction": "backend_response_to_plugin",
       "description": "Future safe editor-native action returned by the backend and executed only by the plugin after validation and user confirmation.",
       "payload_schema": {
-        "action_type": "rename_asset|create_asset|add_input_action|create_material_instance|add_blueprint_variable|add_blueprint_function_stub|tweak_material_parameter|modify_behavior_tree|modify_state_tree|modify_control_rig|modify_niagara_system|modify_eqs_query|modify_level_sequence|modify_metasound|modify_pcg_graph|modify_motion_matching_asset|modify_ik_rig",
+        "action_type": "read_current_selection|open_asset|inspect_asset_metadata|extract_blueprint_graph|search_symbols|search_references|scan_project|compile_project|create_cpp_class|create_plugin|create_module|rename_asset|create_asset|add_input_action|create_material_instance|add_blueprint_variable|add_blueprint_function_stub|tweak_material_parameter|modify_behavior_tree|modify_state_tree|modify_control_rig|modify_niagara_system|modify_eqs_query|modify_level_sequence|modify_metasound|modify_pcg_graph|modify_motion_matching_asset|modify_ik_rig|apply_code_patch_bundle_preview",
         "dry_run": "bool",
         "requires_user_confirmation": "bool",
         "arguments": {
@@ -163,6 +185,7 @@
   "safety_rules": [
     "The backend may suggest editor_action objects, but the plugin is the final safety gate.",
     "The backend may also return a live agent session with steps, pending confirmation, and next actions; the plugin should treat that as resumable workflow state rather than a one-shot answer.",
+    "The plugin can fetch /agent-tools to understand which orchestration steps and Unreal-facing tools are implemented versus still planned.",
     "When approval should immediately continue backend-side follow-up planning, prefer /agent-session/{task_id}/confirm-and-continue over separate confirm and resume calls.",
     "The plugin must reject any action whose target asset no longer matches the current editor state.",
     "All mutating actions should support dry_run first.",

@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -361,6 +362,212 @@ class ApiContractTests(unittest.TestCase):
             "awaiting_confirmation",
         )
 
+    def test_plugin_tool_catalog_returns_agent_and_unreal_tools(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={"tool_name": "tool_catalog", "source": "ue5_plugin"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "tool_catalog")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["payload"]["agent_profile"], "tool_using_agent")
+        self.assertTrue(payload["payload"]["orchestration_tools"])
+        self.assertTrue(payload["payload"]["unreal_tool_catalog"])
+        self.assertTrue(payload["payload"]["confirmation_policy"]["dry_run_before_apply"])
+
+    def test_plugin_tool_read_current_selection_routes_through_normalized_dispatch(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "read_current_selection",
+                "selection_name": "BP_PlayerCharacter",
+                "selection_type": "asset",
+                "asset_path": "Content/Blueprints/BP_PlayerCharacter.uasset",
+                "class_name": "Blueprint",
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "read_current_selection")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["payload"]["selection_name"], "BP_PlayerCharacter")
+        self.assertEqual(payload["payload"]["selection_analysis"]["selection_type"], "asset")
+        self.assertTrue(payload["payload"]["matched_files"])
+
+    def test_plugin_tool_open_asset_in_editor_returns_open_asset_action(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "open_asset_in_editor",
+                "selection_name": "BP_PlayerCharacter",
+                "selection_type": "asset",
+                "asset_path": "Content/Blueprints/BP_PlayerCharacter.uasset",
+                "class_name": "Blueprint",
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "open_asset_in_editor")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["editor_action"]["action_type"], "open_asset")
+        self.assertFalse(payload["editor_action"]["requires_user_confirmation"])
+        self.assertEqual(
+            payload["editor_action"]["arguments"]["asset_path"],
+            "Content/Blueprints/BP_PlayerCharacter.uasset",
+        )
+
+    def test_plugin_tool_compile_project_returns_compile_action(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "compile_project_and_surface_errors",
+                "project_path": "C:/Project",
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "compile_project_and_surface_errors")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["editor_action"]["action_type"], "compile_project")
+        self.assertEqual(payload["editor_action"]["arguments"]["project_path"], "C:/Project")
+        self.assertEqual(payload["editor_action"]["arguments"]["configuration"], "Development")
+        self.assertEqual(payload["editor_action"]["arguments"]["platform"], "Win64")
+
+    def test_plugin_tool_report_compile_result_summarizes_failure(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "report_compile_result",
+                "project_path": "C:/Project",
+                "tool_args": {
+                    "exit_code": 6,
+                    "target_name": "MyGameEditor",
+                    "platform": "Win64",
+                    "configuration": "Development",
+                    "log_path": "C:/Project/Saved/Logs/compile_test.log",
+                    "output_text": (
+                        "Source/MyGame/Private/Player/MyPlayerCharacter.cpp(42): error C2664: "
+                        "cannot convert argument 1 from 'int' to 'FName'\n"
+                        "Build failed."
+                    ),
+                },
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "report_compile_result")
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["payload"]["exit_code"], 6)
+        self.assertTrue(payload["payload"]["diagnosis"])
+        self.assertTrue(payload["payload"]["error_lines"])
+        self.assertIn(
+            "Source/MyGame/Private/Player/MyPlayerCharacter.cpp",
+            payload["payload"]["file_hints"][0],
+        )
+        self.assertTrue(payload["payload"]["next_steps"])
+        self.assertTrue(payload["payload"]["suggested_tool_invocations"])
+        self.assertTrue(payload["payload"]["suggested_agent_goal"])
+        self.assertEqual(
+            payload["payload"]["preferred_target_path"],
+            "Source/MyGame/Private/Player/MyPlayerCharacter.cpp",
+        )
+        self.assertEqual(
+            payload["payload"]["suggested_tool_invocations"][0]["tool_name"],
+            "plan_code_changes",
+        )
+        self.assertEqual(
+            payload["payload"]["suggested_tool_invocations"][0]["tool_args"]["target_path"],
+            "Source/MyGame/Private/Player/MyPlayerCharacter.cpp",
+        )
+
+    def test_plugin_tool_report_compile_result_can_auto_start_followup_agent_session(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "report_compile_result",
+                "project_path": "C:/Project",
+                "tool_args": {
+                    "exit_code": 6,
+                    "target_name": "MyGameEditor",
+                    "platform": "Win64",
+                    "configuration": "Development",
+                    "log_path": "C:/Project/Saved/Logs/compile_test.log",
+                    "auto_start_agent_session": True,
+                    "output_text": (
+                        "Source/MyGame/Private/Player/MyPlayerCharacter.cpp(42): error C2664: "
+                        "cannot convert argument 1 from 'int' to 'FName'\n"
+                        "Build failed."
+                    ),
+                },
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "report_compile_result")
+        self.assertEqual(payload["status"], "error")
+        self.assertTrue(payload["payload"]["followup_agent_task_id"])
+        self.assertEqual(payload["payload"]["followup_agent_session"]["intent"], "agent_session")
+        self.assertIn("fix the Unreal compile error", payload["payload"]["followup_agent_session"]["goal"])
+        self.assertEqual(
+            app_main.AGENT_TASK_CACHE[payload["payload"]["followup_agent_task_id"]]["task_id"],
+            payload["payload"]["followup_agent_task_id"],
+        )
+
+    def test_plugin_tool_plan_code_changes_returns_preview_editor_action(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "plan_code_changes",
+                "tool_args": {"goal": "add sprint input and hook it to the player character"},
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "plan_code_changes")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["editor_action"]["action_type"], "apply_code_patch_bundle_preview")
+        self.assertTrue(payload["payload"]["draft_files"])
+
+    def test_plugin_tool_plan_code_changes_honors_target_path(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "plan_code_changes",
+                "tool_args": {
+                    "goal": "fix the compile error in the player character source",
+                    "target_path": "Source/MyGame/Private/Player/MyPlayerCharacter.cpp",
+                },
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "plan_code_changes")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(
+            payload["payload"]["preferred_target_path"],
+            "Source/MyGame/Private/Player/MyPlayerCharacter.cpp",
+        )
+        self.assertEqual(
+            payload["payload"]["draft_files"][0]["path"],
+            "Source/MyGame/Private/Player/MyPlayerCharacter.cpp",
+        )
+
     def test_plugin_chat_keeps_simple_asset_edit_plan_flow(self):
         response = self.client.post(
             "/plugin/chat",
@@ -396,6 +603,28 @@ class ApiContractTests(unittest.TestCase):
         self.assertTrue(payload["candidate_files"])
         self.assertTrue(payload["candidate_assets"])
         self.assertTrue(payload["stages"])
+
+    def test_agent_task_exposes_tool_using_agent_catalog(self):
+        response = self.client.post(
+            "/agent-task",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["agent_profile"], "tool_using_agent")
+        self.assertTrue(payload["recommended_tool_chain"])
+        self.assertTrue(payload["unreal_tool_catalog"])
+        self.assertTrue(payload["confirmation_policy"]["dry_run_before_apply"])
+        self.assertEqual(payload["unreal_tool_catalog"][0]["recommended"], True)
+        self.assertIn(
+            "read_current_selection",
+            [item["name"] for item in payload["unreal_tool_catalog"]],
+        )
+        self.assertIn(
+            "compile_project_and_surface_errors",
+            [item["name"] for item in payload["unreal_tool_catalog"]],
+        )
 
     def test_agent_task_requires_scanned_project(self):
         app_main.PROJECT_CACHE["analysis"] = None
@@ -436,11 +665,32 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["orchestration"]["phase"], "awaiting_confirmation")
         self.assertEqual(payload["orchestration"]["progress"]["current"], "confirm_agent_step")
         self.assertEqual(payload["orchestration"]["tool_catalog"][0]["name"], "inspect_project_context")
+        self.assertEqual(payload["orchestration"]["tool_catalog"][0]["execution_target"], "backend_orchestrator")
+        self.assertTrue(payload["orchestration"]["tool_catalog"][0]["capability_tags"])
         self.assertEqual(payload["orchestration"]["execution_trace"][0]["tool_name"], "inspect_project_context")
         self.assertEqual(payload["orchestration"]["proposed_plan"][7]["tool_name"], "request_confirmation")
         self.assertEqual(payload["orchestration"]["ranked_candidates"][0]["tool_name"], "confirm_agent_step")
         self.assertEqual(payload["context"]["file_contexts"][0]["path"], "Source/MyGame/Public/Player/MyPlayerCharacter.h")
         self.assertEqual(payload["last_tool_result"]["tool_name"], "request_confirmation")
+
+    def test_agent_tools_endpoint_returns_orchestration_and_unreal_catalogs(self):
+        response = self.client.get("/agent-tools")
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["agent_profile"], "tool_using_agent")
+        self.assertEqual(payload["execution_mode"], "tool_catalog")
+        self.assertTrue(payload["orchestration_tools"])
+        self.assertTrue(payload["unreal_tool_catalog"])
+        self.assertTrue(payload["confirmation_policy"]["resume_after_approval"])
+        self.assertIn(
+            "plan_code_changes",
+            [item["name"] for item in payload["unreal_tool_catalog"]],
+        )
+        self.assertIn(
+            "draft_code_patch_bundle",
+            [item["name"] for item in payload["orchestration_tools"]],
+        )
 
     def test_agent_session_status_and_confirmation_flow(self):
         create_response = self.client.post(
@@ -795,6 +1045,24 @@ class ApiContractTests(unittest.TestCase):
         self.assertTrue(
             any(item["tool_name"] == "prepare_editor_handoff" for item in resumed_payload["orchestration"]["execution_trace"])
         )
+
+    def test_command_contract_lists_tool_catalog_and_richer_editor_actions(self):
+        contract_path = Path("plugin/UE5CopilotAssistant/Docs/command_contract.json")
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+
+        commands = {item["name"]: item for item in contract["commands"]}
+        self.assertIn("tool_catalog", commands)
+        self.assertIn("plugin_tool", commands)
+        self.assertEqual(commands["tool_catalog"]["mapped_backend_route"], "/agent-tools")
+        self.assertEqual(commands["plugin_tool"]["mapped_backend_route"], "/plugin/tool")
+        self.assertIn("open_asset_in_editor", commands["plugin_tool"]["payload_schema"]["tool_name"])
+        self.assertIn("compile_project_and_surface_errors", commands["plugin_tool"]["payload_schema"]["tool_name"])
+        self.assertIn("report_compile_result", commands["plugin_tool"]["payload_schema"]["tool_name"])
+        execute_schema = commands["execute_editor_action"]["payload_schema"]
+        self.assertIn("open_asset", execute_schema["action_type"])
+        self.assertIn("compile_project", execute_schema["action_type"])
+        self.assertIn("create_module", execute_schema["action_type"])
+        self.assertIn("apply_code_patch_bundle_preview", execute_schema["action_type"])
 
     def test_agent_session_confirm_and_continue_collapses_approve_and_resume(self):
         create_response = self.client.post(
