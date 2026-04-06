@@ -409,7 +409,7 @@ Relevant project files:
             content = (response.choices[0].message.content or "").strip()
             payload = json.loads(content)
             if isinstance(payload, dict) and payload.get("intent"):
-                return {
+                result = {
                     "intent": str(payload.get("intent", "ask")).strip(),
                     "asset_kind": str(payload.get("asset_kind", "")).strip(),
                     "asset_name": str(payload.get("asset_name", "")).strip(),
@@ -417,6 +417,16 @@ Relevant project files:
                     "class_name": str(payload.get("class_name", "")).strip() or class_name,
                     "change_request": str(payload.get("change_request", "")).strip(),
                 }
+                if result["intent"] != "agent_session" and should_route_to_agent_session(
+                    message=message,
+                    selection_name=selection_name,
+                    asset_path=asset_path,
+                    class_name=class_name,
+                    exported_text=exported_text,
+                ):
+                    result["intent"] = "agent_session"
+                    result["change_request"] = message
+                return result
         except Exception:
             pass
 
@@ -471,6 +481,8 @@ Relevant project files:
         has_selection = bool(selection_name or asset_path or class_name)
 
         if ("input" in lowered and has_code_signal and has_multi_step_signal):
+            return True
+        if has_selection and "input" in lowered and any(token in lowered for token in ("hook", "wire", "bind", "character", "controller", "component")):
             return True
         if has_code_signal and has_asset_signal and has_multi_step_signal:
             return True

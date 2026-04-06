@@ -1,6 +1,8 @@
 import os
 import re
 import sys
+from pathlib import Path
+from uuid import uuid4
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -19,13 +21,21 @@ from app.search_index import build_search_index
 from app.code_patch_planner import build_code_patch_plan
 from app.code_patch_drafter import build_code_patch_draft
 from app.code_patch_bundle_drafter import build_code_patch_bundle_draft
+from app.code_patch_drafter import hash_content
+from app.code_patch_bundle_verification import (
+    build_agent_session_approval_token,
+    build_agent_session_dry_run_receipt_token,
+    build_code_patch_bundle_verification_token,
+)
 from app.task_orchestrator import build_agent_task_plan
 from app.agent_runner import (
     start_agent_task_session,
     confirm_agent_task_session,
     resume_agent_task_session,
+    step_agent_task_session,
     confirm_and_continue_agent_task_session,
 )
+from app.agent_orchestrator import refresh_orchestration_state
 from app.prompts import (
     CRASH_LOG_SYSTEM_PROMPT,
     DEEP_ASSET_ANALYSIS_SYSTEM_PROMPT,
@@ -163,6 +173,7 @@ class TaskRequest(BaseModel):
 class AgentTaskRequest(BaseModel):
     goal: str
     project_path: str | None = None
+    auto_run: bool = True
 
 
 class AgentConfirmationRequest(BaseModel):
@@ -172,6 +183,21 @@ class AgentConfirmationRequest(BaseModel):
 class CodePatchRequest(BaseModel):
     goal: str
     target_path: str | None = None
+
+
+class CodePatchBundleApplyDryRunRequest(BaseModel):
+    files: list[dict]
+    task_id: str | None = None
+    approval_token: str | None = None
+
+
+class CodePatchBundleApplyRequest(BaseModel):
+    files: list[dict]
+    dry_run_verified: bool = False
+    verification_token: str | None = None
+    task_id: str | None = None
+    approval_token: str | None = None
+    receipt_token: str | None = None
 
 
 class AssetFamilyRequest(BaseModel):
@@ -405,9 +431,14 @@ def agent_session(request: AgentTaskRequest):
         assets=analysis["assets"],
         matched_files=matched_files,
         family_summaries=family_summaries,
+        auto_run=request.auto_run,
     )
     AGENT_TASK_CACHE[session["task_id"]] = session
-    remember_interaction(goal, session.get("result", {}).get("summary") or session["steps"][-1]["summary"])
+    remember_interaction(
+        goal,
+        (session.get("result") or {}).get("summary")
+        or (session["steps"][-1]["summary"] if session.get("steps") else "Created an agent session."),
+    )
     return session
 
 
@@ -425,6 +456,64 @@ def agent_session_status_post(task_id: str):
     if not session:
         return {"error": "That agent task session was not found."}
     return session
+
+
+@app.get("/agent-session/{task_id}/execution-state")
+def agent_session_execution_state(task_id: str):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+    return {
+        "task_id": task_id,
+        "status": session.get("status"),
+        "execution_state": (session.get("orchestration") or {}).get("execution_state", {}),
+    }
+
+
+@app.post("/agent-session/{task_id}/execution-state")
+def agent_session_execution_state_post(task_id: str):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+    return {
+        "task_id": task_id,
+        "status": session.get("status"),
+        "execution_state": (session.get("orchestration") or {}).get("execution_state", {}),
+    }
+
+
+@app.get("/agent-session/{task_id}/events")
+def agent_session_events(task_id: str, after: int = -1):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+    return build_agent_session_event_feed(task_id=task_id, session=session, after=after)
+
+
+@app.post("/agent-session/{task_id}/events")
+def agent_session_events_post(task_id: str, after: int = -1):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+    return build_agent_session_event_feed(task_id=task_id, session=session, after=after)
+
+
+@app.post("/agent-session/{task_id}/step")
+def agent_session_step(task_id: str):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+
+    updated_session = step_agent_task_session(session)
+    if updated_session.get("error"):
+        return updated_session
+
+    AGENT_TASK_CACHE[task_id] = updated_session
+    remember_interaction(
+        f"agent-session:{task_id}:step",
+        (updated_session.get("result") or {}).get("summary") or updated_session.get("status", "running"),
+    )
+    return updated_session
 
 
 @app.post("/agent-session/{task_id}/confirm")
@@ -548,6 +637,119 @@ def code_patch_bundle_draft(request: CodePatchRequest):
     )
     remember_interaction(goal, draft.get("summary", "Generated a code patch bundle draft."))
     return draft
+
+
+@app.post("/code-patch-bundle-apply-dry-run")
+def code_patch_bundle_apply_dry_run(request: CodePatchBundleApplyDryRunRequest):
+    approval_check = validate_agent_session_apply_approval(
+        task_id=request.task_id,
+        approval_token=request.approval_token,
+        files=request.files or [],
+    )
+    if approval_check:
+        return approval_check
+    verification = verify_code_patch_bundle_preview_files(request.files or [])
+    if verification.get("error"):
+        return verification
+    response = {
+        "execution_mode": "dry_run",
+        **verification,
+    }
+    receipt = mint_agent_session_dry_run_receipt(
+        task_id=request.task_id,
+        approval_token=request.approval_token,
+        verification=verification,
+    )
+    if receipt:
+        response["dry_run_receipt"] = receipt
+    return response
+
+
+@app.post("/code-patch-bundle-apply")
+def code_patch_bundle_apply(request: CodePatchBundleApplyRequest):
+    if not request.dry_run_verified:
+        return {"error": "Run a clean dry run first and send `dry_run_verified: true` before applying."}
+
+    approval_check = validate_agent_session_apply_approval(
+        task_id=request.task_id,
+        approval_token=request.approval_token,
+        files=request.files or [],
+    )
+    if approval_check:
+        return approval_check
+    receipt_check = validate_agent_session_dry_run_receipt(
+        task_id=request.task_id,
+        approval_token=request.approval_token,
+        receipt_token=request.receipt_token,
+        files=request.files or [],
+    )
+    if receipt_check:
+        return receipt_check
+
+    verification = verify_code_patch_bundle_preview_files(request.files or [])
+    if verification.get("error"):
+        return verification
+    if request.verification_token:
+        expected_token = build_code_patch_bundle_verification_token(request.files or [])
+        if request.verification_token != expected_token:
+            return {"error": "The verification token does not match the staged preview payload."}
+    if not verification.get("verified"):
+        return {
+            "execution_mode": "apply",
+            **verification,
+            "applied": False,
+            "summary": "Apply was blocked because the staged preview no longer matches the current project state.",
+        }
+
+    project_root = (PROJECT_CACHE["project_path"] or "").strip()
+    if not project_root:
+        return {"error": "No project has been scanned yet."}
+
+    applied_files = []
+    for item in request.files:
+        target_path = str(item.get("target_path", "")).strip()
+        updated_content = str(item.get("updated_content", ""))
+        resolved_path = resolve_project_file_path(target_path)
+        if not resolved_path:
+            return {"error": f"Refused to apply because `{target_path}` is outside the scanned project root."}
+        resolved_path.write_text(updated_content, encoding="utf-8")
+        applied_files.append({"target_path": target_path, "resolved_path": str(resolved_path)})
+
+    reload_result = load_project_into_cache(project_root)
+    if "error" in reload_result:
+        return {"error": reload_result["error"]}
+    if request.task_id and request.approval_token:
+        session = AGENT_TASK_CACHE.get(request.task_id)
+        if session:
+            session.setdefault("artifacts", {})["session_apply_status"] = {
+                "applied": True,
+                "last_event": "applied",
+                "verification_token": build_code_patch_bundle_verification_token(request.files or []),
+                "applied_file_count": len(applied_files),
+            }
+            append_agent_session_event(
+                session,
+                event_type="applied",
+                summary="Applied the staged patch bundle after a verified dry run.",
+                payload={"applied_file_count": len(applied_files)},
+            )
+            refresh_orchestration_state(session)
+            AGENT_TASK_CACHE[request.task_id] = session
+    consume_agent_session_dry_run_receipt(
+        task_id=request.task_id,
+        approval_token=request.approval_token,
+    )
+
+    return {
+        "execution_mode": "apply",
+        "action_type": "apply_code_patch_bundle_preview",
+        "verified": True,
+        "applied": True,
+        "verification_token": build_code_patch_bundle_verification_token(request.files or []),
+        "file_count": len(applied_files),
+        "applied_files": applied_files,
+        "summary": "Applied the staged code patch bundle preview and refreshed the scanned project cache.",
+    }
 
 
 @app.post("/references")
@@ -784,6 +986,304 @@ def get_analyzed_files():
     if not analysis:
         return []
     return analysis["files"]
+
+
+def verify_code_patch_bundle_preview_files(requested_files: list[dict]):
+    analysis = PROJECT_CACHE["analysis"]
+    analyzed_files = get_analyzed_files()
+    if not analysis or not analyzed_files:
+        return {"error": "No project has been scanned yet."}
+
+    if not requested_files:
+        return {"error": "Provide at least one staged file preview first."}
+
+    file_by_path = {item["path"]: item for item in analysis["files"]}
+    verified_files = []
+    all_verified = True
+
+    for item in requested_files:
+        target_path = str(item.get("target_path", "")).strip()
+        if not target_path:
+            verified_files.append(
+                {
+                    "target_path": "",
+                    "status": "invalid",
+                    "verified": False,
+                    "reason": "Missing target_path in staged preview.",
+                }
+            )
+            all_verified = False
+            continue
+
+        file_record = file_by_path.get(target_path)
+        if not file_record:
+            verified_files.append(
+                {
+                    "target_path": target_path,
+                    "status": "missing",
+                    "verified": False,
+                    "reason": "The target file was not found in the scanned project cache.",
+                }
+            )
+            all_verified = False
+            continue
+
+        current_content = file_record.get("content", "")
+        current_hash = hash_content(current_content)
+        expected_hash = str(item.get("original_content_hash", "")).strip()
+        updated_content = str(item.get("updated_content", ""))
+        hash_matches = bool(expected_hash) and current_hash == expected_hash
+
+        verified_files.append(
+            {
+                "target_path": target_path,
+                "status": "verified" if hash_matches else "stale",
+                "verified": hash_matches,
+                "reason": "The current file content matches the staged preview hash."
+                if hash_matches
+                else "The file has changed since the preview was generated.",
+                "current_content_hash": current_hash,
+                "expected_content_hash": expected_hash,
+                "edit_kind": str(item.get("edit_kind", "")).strip(),
+                "updated_content_hash": hash_content(updated_content) if updated_content else "",
+            }
+        )
+        if not hash_matches:
+            all_verified = False
+
+    return {
+        "action_type": "apply_code_patch_bundle_preview",
+        "verified": all_verified,
+        "verification_token": build_code_patch_bundle_verification_token(requested_files),
+        "file_count": len(verified_files),
+        "verified_files": verified_files,
+        "summary": "The staged code patch bundle preview is ready to apply."
+        if all_verified
+        else "One or more staged files are stale or invalid; regenerate the preview before applying.",
+    }
+
+
+def resolve_project_file_path(target_path: str):
+    project_root = (PROJECT_CACHE["project_path"] or "").strip()
+    if not project_root:
+        return None
+
+    root = Path(project_root).resolve()
+    candidate = Path(target_path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = candidate.resolve()
+
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def validate_agent_session_apply_approval(*, task_id: str | None, approval_token: str | None, files: list[dict]):
+    normalized_task_id = (task_id or "").strip()
+    normalized_approval_token = (approval_token or "").strip()
+    if not normalized_task_id and not normalized_approval_token:
+        return None
+    if not normalized_task_id or not normalized_approval_token:
+        return {"error": "Session-scoped apply requests must include both `task_id` and `approval_token`."}
+
+    session = AGENT_TASK_CACHE.get(normalized_task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+
+    session_approval = (session.get("artifacts") or {}).get("session_approval") or {}
+    approval_nonce = str(session_approval.get("approval_nonce", "")).strip()
+    staged_verification_token = str(session_approval.get("verification_token", "")).strip()
+    if not approval_nonce or not staged_verification_token:
+        return {"error": "That agent task session does not have an approved apply bundle."}
+
+    request_verification_token = build_code_patch_bundle_verification_token(files or [])
+    if request_verification_token != staged_verification_token:
+        return {"error": "The staged files no longer match the approved session bundle."}
+
+    expected_approval_token = build_agent_session_approval_token(
+        task_id=normalized_task_id,
+        verification_token=staged_verification_token,
+        approval_nonce=approval_nonce,
+    )
+    if normalized_approval_token != expected_approval_token:
+        return {"error": "The session approval token does not match the approved agent session."}
+
+    if session.get("approved_editor_action", {}).get("action_type") != "apply_code_patch_bundle_preview":
+        return {"error": "That agent task session is not approved for a code patch bundle apply."}
+
+    return None
+
+
+def mint_agent_session_dry_run_receipt(*, task_id: str | None, approval_token: str | None, verification: dict):
+    normalized_task_id = (task_id or "").strip()
+    normalized_approval_token = (approval_token or "").strip()
+    if not normalized_task_id or not normalized_approval_token:
+        return None
+    if not verification.get("verified"):
+        return None
+
+    session = AGENT_TASK_CACHE.get(normalized_task_id)
+    if not session:
+        return None
+
+    verification_token = str(verification.get("verification_token", "")).strip()
+    if not verification_token:
+        return None
+
+    receipt_nonce = str(uuid4())
+    receipt_token = build_agent_session_dry_run_receipt_token(
+        task_id=normalized_task_id,
+        approval_token=normalized_approval_token,
+        verification_token=verification_token,
+        receipt_nonce=receipt_nonce,
+    )
+    session.setdefault("artifacts", {})["session_dry_run_receipt"] = {
+        "task_id": normalized_task_id,
+        "approval_token": normalized_approval_token,
+        "verification_token": verification_token,
+        "receipt_nonce": receipt_nonce,
+        "receipt_token": receipt_token,
+    }
+    session.setdefault("artifacts", {})["session_apply_status"] = {
+        "applied": False,
+        "last_event": "dry_run_verified",
+        "verification_token": verification_token,
+    }
+    append_agent_session_event(
+        session,
+        event_type="dry_run_verified",
+        summary="Verified the staged patch bundle with a clean dry run.",
+        payload={"verification_token": verification_token},
+    )
+    refresh_orchestration_state(session)
+    AGENT_TASK_CACHE[normalized_task_id] = session
+    return {
+        "task_id": normalized_task_id,
+        "receipt_token": receipt_token,
+    }
+
+
+def validate_agent_session_dry_run_receipt(
+    *,
+    task_id: str | None,
+    approval_token: str | None,
+    receipt_token: str | None,
+    files: list[dict],
+):
+    normalized_task_id = (task_id or "").strip()
+    normalized_approval_token = (approval_token or "").strip()
+    if not normalized_task_id and not normalized_approval_token:
+        return None
+
+    normalized_receipt_token = (receipt_token or "").strip()
+    if not normalized_receipt_token:
+        return {"error": "Session-scoped final apply requests must include the latest dry-run `receipt_token`."}
+
+    session = AGENT_TASK_CACHE.get(normalized_task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+
+    receipt = (session.get("artifacts") or {}).get("session_dry_run_receipt") or {}
+    stored_approval_token = str(receipt.get("approval_token", "")).strip()
+    stored_verification_token = str(receipt.get("verification_token", "")).strip()
+    stored_receipt_nonce = str(receipt.get("receipt_nonce", "")).strip()
+    if not stored_approval_token or not stored_verification_token or not stored_receipt_nonce:
+        return {"error": "That agent task session does not have a recent dry-run receipt."}
+
+    if stored_approval_token != normalized_approval_token:
+        return {"error": "The dry-run receipt does not match the approved session bundle."}
+
+    request_verification_token = build_code_patch_bundle_verification_token(files or [])
+    if request_verification_token != stored_verification_token:
+        return {"error": "The staged files no longer match the dry-run receipt."}
+
+    expected_receipt_token = build_agent_session_dry_run_receipt_token(
+        task_id=normalized_task_id,
+        approval_token=normalized_approval_token,
+        verification_token=stored_verification_token,
+        receipt_nonce=stored_receipt_nonce,
+    )
+    if normalized_receipt_token != expected_receipt_token:
+        return {"error": "The dry-run receipt token does not match the latest verified session payload."}
+
+    return None
+
+
+def consume_agent_session_dry_run_receipt(*, task_id: str | None, approval_token: str | None):
+    normalized_task_id = (task_id or "").strip()
+    normalized_approval_token = (approval_token or "").strip()
+    if not normalized_task_id or not normalized_approval_token:
+        return
+
+    session = AGENT_TASK_CACHE.get(normalized_task_id)
+    if not session:
+        return
+
+    receipt = (session.get("artifacts") or {}).get("session_dry_run_receipt") or {}
+    if str(receipt.get("approval_token", "")).strip() != normalized_approval_token:
+        return
+
+    session.setdefault("artifacts", {})["session_dry_run_receipt"] = None
+    refresh_orchestration_state(session)
+    AGENT_TASK_CACHE[normalized_task_id] = session
+
+
+def append_agent_session_event(session: dict, *, event_type: str, summary: str, payload: dict | None = None):
+    artifacts = session.setdefault("artifacts", {})
+    event_log = artifacts.setdefault("session_event_log", [])
+    event_log.append(
+        {
+            "event_type": event_type,
+            "summary": summary,
+            "payload": payload or {},
+            "step_count": len(session.get("steps", [])),
+            "sequence": len(event_log),
+        }
+    )
+
+
+def build_agent_session_event_feed(*, task_id: str, session: dict, after: int = -1):
+    events = []
+    for step_index, step in enumerate(session.get("steps", [])):
+        events.append(
+            {
+                "index": len(events),
+                "event_type": "tool_step",
+                "task_id": task_id,
+                "tool_name": step.get("tool_name"),
+                "status": step.get("status"),
+                "summary": step.get("summary"),
+                "step_index": step_index,
+            }
+        )
+
+    custom_events = (session.get("artifacts") or {}).get("session_event_log", [])
+    custom_events = sorted(custom_events, key=lambda item: (item.get("step_count", 0), item.get("sequence", 0)))
+    for item in custom_events:
+        events.append(
+            {
+                "index": len(events),
+                "event_type": item.get("event_type"),
+                "task_id": task_id,
+                "summary": item.get("summary"),
+                "payload": item.get("payload", {}),
+                "step_count": item.get("step_count", 0),
+            }
+        )
+
+    next_cursor = len(events) - 1
+    filtered_events = [item for item in events if item["index"] > after]
+    return {
+        "task_id": task_id,
+        "status": session.get("status"),
+        "events": filtered_events,
+        "next_cursor": next_cursor,
+        "has_more": False,
+        "execution_state": (session.get("orchestration") or {}).get("execution_state", {}),
+    }
 
 
 def find_file_record(path_or_name: str):

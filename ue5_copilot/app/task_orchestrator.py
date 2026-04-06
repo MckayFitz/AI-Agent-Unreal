@@ -35,6 +35,7 @@ def build_agent_task_plan(
         "candidate_assets": candidate_assets[:8],
         "suggested_backend_routes": suggested_routes,
         "suggested_editor_actions": suggested_editor_actions,
+        "tool_preferences": infer_tool_preferences(task_type, lowered_goal, candidate_assets),
         "stages": stages,
         "risks": risks[:8],
     }
@@ -111,9 +112,9 @@ def build_candidate_assets(assets: list[dict[str, Any]], lowered_goal: str) -> l
 
 def classify_task_type(lowered_goal: str, candidate_assets: list[dict[str, Any]]) -> str:
     has_asset_candidates = bool(candidate_assets)
-    mentions_create = any(token in lowered_goal for token in ("create", "new ", "generate", "scaffold"))
+    mentions_create = any(has_goal_term(lowered_goal, token) for token in ("create", "new", "generate", "scaffold"))
     mentions_code = any(
-        token in lowered_goal
+        has_goal_term(lowered_goal, token)
         for token in (
             "code",
             "c++",
@@ -130,8 +131,8 @@ def classify_task_type(lowered_goal: str, candidate_assets: list[dict[str, Any]]
             "actor",
         )
     )
-    mentions_change = any(token in lowered_goal for token in ("add", "update", "modify", "change", "hook", "wire", "rename", "set", "fix"))
-    mentions_analysis = any(token in lowered_goal for token in ("explain", "analyze", "inspect", "understand", "where", "how"))
+    mentions_change = any(has_goal_term(lowered_goal, token) for token in ("add", "update", "modify", "change", "hook", "wire", "rename", "set", "fix"))
+    mentions_analysis = any(has_goal_term(lowered_goal, token) for token in ("explain", "analyze", "inspect", "understand", "where", "how"))
     mentions_asset_family = any(asset.get("family") for asset in candidate_assets)
 
     if mentions_create and mentions_code and has_asset_candidates:
@@ -149,6 +150,15 @@ def classify_task_type(lowered_goal: str, candidate_assets: list[dict[str, Any]]
     if mentions_analysis or not has_asset_candidates:
         return "investigation"
     return "task_plan"
+
+
+def has_goal_term(lowered_goal: str, term: str) -> bool:
+    normalized_term = (term or "").strip().lower()
+    if not normalized_term:
+        return False
+    if re.fullmatch(r"[a-z0-9_]+", normalized_term):
+        return re.search(rf"\b{re.escape(normalized_term)}\b", lowered_goal) is not None
+    return normalized_term in lowered_goal
 
 
 def infer_systems(candidate_files: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -184,6 +194,64 @@ def infer_suggested_editor_actions(task_type: str, candidate_assets: list[dict[s
         actions.append("tweak_material_parameter")
 
     return dedupe_strings(actions)
+
+
+def infer_tool_preferences(task_type: str, lowered_goal: str, candidate_assets: list[dict[str, Any]]) -> dict[str, Any]:
+    preferred: list[str] = []
+    suppressed: list[str] = []
+    boosted: dict[str, int] = {}
+    required_artifacts: dict[str, list[str]] = {}
+    stop_after_tools: list[str] = []
+
+    if task_type == "investigation":
+        preferred = ["search_project", "read_file_context", "analyze_selection", "summarize_progress"]
+        suppressed = ["draft_code_patch_bundle", "request_confirmation", "draft_asset_plan"]
+        boosted["search_project"] = 90
+        boosted["read_file_context"] = 70
+        stop_after_tools = ["analyze_selection"]
+    elif task_type == "hybrid_feature":
+        preferred = ["draft_asset_plan", "draft_code_patch_bundle", "request_confirmation"]
+        boosted["draft_asset_plan"] = 60
+        boosted["draft_code_patch_bundle"] = 55
+    elif task_type in {"code_change", "code_generation"}:
+        preferred = ["draft_code_patch_bundle", "request_confirmation", "summarize_progress"]
+        suppressed = ["draft_asset_plan"]
+        boosted["draft_code_patch_bundle"] = 80
+    elif task_type in {"asset_creation", "asset_edit"}:
+        preferred = ["draft_asset_plan", "summarize_progress"]
+        suppressed = ["draft_code_patch_bundle", "request_confirmation"]
+        boosted["draft_asset_plan"] = 80
+
+    if has_goal_term(lowered_goal, "explain") or has_goal_term(lowered_goal, "inspect") or has_goal_term(lowered_goal, "understand"):
+        suppressed = dedupe_strings(suppressed + ["draft_code_patch_bundle", "request_confirmation"])
+        boosted["search_project"] = max(boosted.get("search_project", 0), 120)
+        boosted["analyze_selection"] = max(boosted.get("analyze_selection", 0), 80)
+
+    families = {(item.get("family") or "").lower() for item in candidate_assets}
+    if "blueprint" in families:
+        boosted["analyze_selection"] = max(boosted.get("analyze_selection", 0), 35)
+    if "enhanced_input" in families:
+        boosted["draft_asset_plan"] = max(boosted.get("draft_asset_plan", 0), 40)
+
+    required_artifacts["read_file_context"] = ["search_results"]
+    required_artifacts["analyze_selection"] = ["candidate_files_or_assets"]
+    required_artifacts["draft_asset_plan"] = ["selection_summary"]
+    required_artifacts["draft_code_patch_bundle"] = ["selection_summary"]
+    required_artifacts["request_confirmation"] = ["code_patch_bundle"]
+    required_artifacts["stage_editor_execution_package"] = ["approved_editor_action"]
+    required_artifacts["prepare_editor_handoff"] = ["editor_execution_package"]
+    required_artifacts["stage_apply_ready_preview"] = ["editor_execution_package"]
+    required_artifacts["stage_validation_commands"] = ["editor_execution_package"]
+    required_artifacts["draft_supporting_asset_scaffolds"] = ["followup_assets"]
+    required_artifacts["summarize_progress"] = ["analysis_complete"]
+
+    return {
+        "preferred_tools": dedupe_strings(preferred),
+        "suppressed_tools": dedupe_strings(suppressed),
+        "score_boosts": boosted,
+        "required_artifacts": required_artifacts,
+        "stop_after_tools": dedupe_strings(stop_after_tools),
+    }
 
 
 def build_execution_stages(

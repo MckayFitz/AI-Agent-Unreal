@@ -353,6 +353,9 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["pending_confirmation"]["editor_action"]["action_type"], "apply_code_patch_bundle_preview")
         self.assertEqual(payload["result"]["code_patch_bundle"]["draft_files"][0]["path"], "Source/MyGame/Public/Player/MyPlayerCharacter.h")
         self.assertEqual(payload["session"]["execution_mode"], "agent_loop")
+        self.assertEqual(payload["session"]["orchestration"]["phase"], "awaiting_confirmation")
+        self.assertEqual(payload["session"]["orchestration"]["progress"]["current"], "confirm_agent_step")
+        self.assertEqual(payload["session"]["orchestration"]["proposed_plan"][0]["tool_name"], "inspect_project_context")
         self.assertEqual(
             app_main.AGENT_TASK_CACHE[payload["task_id"]]["status"],
             "awaiting_confirmation",
@@ -417,15 +420,27 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["execution_mode"], "agent_loop")
         self.assertEqual(payload["status"], "awaiting_confirmation")
         self.assertTrue(payload["task_id"])
-        self.assertEqual([step["tool_name"] for step in payload["steps"][:4]], [
+        self.assertEqual([step["tool_name"] for step in payload["steps"][:8]], [
             "inspect_project_context",
             "plan_task",
+            "search_project",
+            "read_file_context",
+            "analyze_selection",
+            "draft_asset_plan",
             "draft_code_patch_bundle",
             "request_confirmation",
         ])
         self.assertEqual(payload["available_tools"], ["confirm_agent_step"])
         self.assertEqual(payload["pending_confirmation"]["editor_action"]["action_type"], "apply_code_patch_bundle_preview")
         self.assertIn("Source/MyGame/Public/Player/MyPlayerCharacter.h", payload["pending_confirmation"]["target_paths"])
+        self.assertEqual(payload["orchestration"]["phase"], "awaiting_confirmation")
+        self.assertEqual(payload["orchestration"]["progress"]["current"], "confirm_agent_step")
+        self.assertEqual(payload["orchestration"]["tool_catalog"][0]["name"], "inspect_project_context")
+        self.assertEqual(payload["orchestration"]["execution_trace"][0]["tool_name"], "inspect_project_context")
+        self.assertEqual(payload["orchestration"]["proposed_plan"][7]["tool_name"], "request_confirmation")
+        self.assertEqual(payload["orchestration"]["ranked_candidates"][0]["tool_name"], "confirm_agent_step")
+        self.assertEqual(payload["context"]["file_contexts"][0]["path"], "Source/MyGame/Public/Player/MyPlayerCharacter.h")
+        self.assertEqual(payload["last_tool_result"]["tool_name"], "request_confirmation")
 
     def test_agent_session_status_and_confirmation_flow(self):
         create_response = self.client.post(
@@ -458,6 +473,227 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(confirmed_payload["steps"][-1]["tool_name"], "resolve_confirmation")
         self.assertEqual(confirmed_payload["available_tools"], ["resume_agent_session"])
         self.assertEqual(confirmed_payload["result"]["next_action"], "resume_agent_session")
+        self.assertEqual(confirmed_payload["orchestration"]["phase"], "approved_waiting_for_resume")
+        self.assertEqual(confirmed_payload["orchestration"]["progress"]["current"], "resume_agent_session")
+        self.assertEqual(confirmed_payload["pending_decision"], None)
+        self.assertEqual(confirmed_payload["artifacts"]["session_approval"]["task_id"], task_id)
+        self.assertTrue(confirmed_payload["artifacts"]["session_approval"]["approval_token"])
+        self.assertEqual(
+            confirmed_payload["orchestration"]["execution_state"]["current_stage"],
+            "approved_waiting_for_resume",
+        )
+        self.assertEqual(
+            confirmed_payload["orchestration"]["execution_state"]["next_required_action"],
+            "resume_agent_session",
+        )
+
+    def test_agent_session_execution_state_endpoint_tracks_lifecycle(self):
+        app_main.PROJECT_CACHE["project_path"] = None
+        app_main.PROJECT_CACHE["files"] = []
+        app_main.PROJECT_CACHE["assets"] = []
+        app_main.PROJECT_CACHE["analysis"] = None
+        app_main.PROJECT_CACHE["search_index"] = None
+
+        with TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            header_path = project_root / "Source" / "MyGame" / "Public" / "MyPlayerCharacter.h"
+            source_path = project_root / "Source" / "MyGame" / "Private" / "MyPlayerCharacter.cpp"
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            header_path.write_text(
+                """
+                UCLASS(Blueprintable)
+                class AMyPlayerCharacter : public ACharacter
+                {
+                    GENERATED_BODY()
+                public:
+                    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Movement")
+                    float MaxSprintSpeed;
+                };
+                """,
+                encoding="utf-8",
+            )
+            source_path.write_text(
+                """
+                #include "MyPlayerCharacter.h"
+                void AMyPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+                {
+                    Super::SetupPlayerInputComponent(PlayerInputComponent);
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            scan_response = self.client.post("/scan-project", json={"project_path": str(project_root)})
+            self.assertEqual(scan_response.status_code, 200)
+
+            create_response = self.client.post(
+                "/agent-session",
+                json={"goal": "add sprint input and hook it to the player character"},
+            )
+            self.assertEqual(create_response.status_code, 200)
+            task_id = create_response.json()["task_id"]
+
+            initial_execution_state = self.client.get(f"/agent-session/{task_id}/execution-state")
+            self.assertEqual(initial_execution_state.status_code, 200)
+            self.assertEqual(
+                initial_execution_state.json()["execution_state"]["current_stage"],
+                "awaiting_confirmation",
+            )
+
+            confirm_response = self.client.post(
+                f"/agent-session/{task_id}/confirm",
+                json={"decision": "approve"},
+            )
+            self.assertEqual(confirm_response.status_code, 200)
+
+            approved_execution_state = self.client.post(f"/agent-session/{task_id}/execution-state")
+            self.assertEqual(approved_execution_state.status_code, 200)
+            self.assertEqual(
+                approved_execution_state.json()["execution_state"]["current_stage"],
+                "approved_waiting_for_resume",
+            )
+
+            resume_response = self.client.post(f"/agent-session/{task_id}/resume")
+            self.assertEqual(resume_response.status_code, 200)
+            apply_ready_preview = resume_response.json()["result"]["apply_ready_preview"]
+
+            apply_ready_execution_state = self.client.get(f"/agent-session/{task_id}/execution-state")
+            self.assertEqual(apply_ready_execution_state.status_code, 200)
+            self.assertEqual(
+                apply_ready_execution_state.json()["execution_state"]["current_stage"],
+                "approved_waiting_for_dry_run",
+            )
+
+            dry_run_response = self.client.post(
+                "/code-patch-bundle-apply-dry-run",
+                json=apply_ready_preview["dry_run_request"],
+            )
+            self.assertEqual(dry_run_response.status_code, 200)
+            receipt_token = dry_run_response.json()["dry_run_receipt"]["receipt_token"]
+
+            dry_run_execution_state = self.client.get(f"/agent-session/{task_id}/execution-state")
+            self.assertEqual(dry_run_execution_state.status_code, 200)
+            self.assertEqual(
+                dry_run_execution_state.json()["execution_state"]["current_stage"],
+                "dry_run_verified",
+            )
+
+            apply_request = dict(apply_ready_preview["final_apply_request"])
+            apply_request["receipt_token"] = receipt_token
+            apply_response = self.client.post(
+                "/code-patch-bundle-apply",
+                json=apply_request,
+            )
+            self.assertEqual(apply_response.status_code, 200)
+
+            applied_execution_state = self.client.post(f"/agent-session/{task_id}/execution-state")
+            self.assertEqual(applied_execution_state.status_code, 200)
+            self.assertEqual(
+                applied_execution_state.json()["execution_state"]["current_stage"],
+                "applied",
+            )
+
+    def test_agent_session_events_endpoint_supports_incremental_polling(self):
+        app_main.PROJECT_CACHE["project_path"] = None
+        app_main.PROJECT_CACHE["files"] = []
+        app_main.PROJECT_CACHE["assets"] = []
+        app_main.PROJECT_CACHE["analysis"] = None
+        app_main.PROJECT_CACHE["search_index"] = None
+
+        with TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            header_path = project_root / "Source" / "MyGame" / "Public" / "MyPlayerCharacter.h"
+            source_path = project_root / "Source" / "MyGame" / "Private" / "MyPlayerCharacter.cpp"
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            header_path.write_text(
+                """
+                UCLASS(Blueprintable)
+                class AMyPlayerCharacter : public ACharacter
+                {
+                    GENERATED_BODY()
+                public:
+                    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Movement")
+                    float MaxSprintSpeed;
+                };
+                """,
+                encoding="utf-8",
+            )
+            source_path.write_text(
+                """
+                #include "MyPlayerCharacter.h"
+                void AMyPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+                {
+                    Super::SetupPlayerInputComponent(PlayerInputComponent);
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            scan_response = self.client.post("/scan-project", json={"project_path": str(project_root)})
+            self.assertEqual(scan_response.status_code, 200)
+
+            create_response = self.client.post(
+                "/agent-session",
+                json={"goal": "add sprint input and hook it to the player character"},
+            )
+            self.assertEqual(create_response.status_code, 200)
+            task_id = create_response.json()["task_id"]
+
+            initial_events = self.client.get(f"/agent-session/{task_id}/events")
+            self.assertEqual(initial_events.status_code, 200)
+            initial_payload = initial_events.json()
+            self.assertGreaterEqual(len(initial_payload["events"]), 1)
+            self.assertEqual(initial_payload["events"][0]["event_type"], "tool_step")
+            cursor = initial_payload["next_cursor"]
+
+            continue_response = self.client.post(
+                f"/agent-session/{task_id}/confirm-and-continue",
+                json={"decision": "approve"},
+            )
+            self.assertEqual(continue_response.status_code, 200)
+            apply_ready_preview = continue_response.json()["result"]["apply_ready_preview"]
+
+            orchestration_events = self.client.get(f"/agent-session/{task_id}/events?after={cursor}")
+            self.assertEqual(orchestration_events.status_code, 200)
+            orchestration_payload = orchestration_events.json()
+            self.assertGreaterEqual(len(orchestration_payload["events"]), 1)
+            self.assertEqual(orchestration_payload["events"][0]["event_type"], "tool_step")
+            cursor = orchestration_payload["next_cursor"]
+
+            dry_run_response = self.client.post(
+                "/code-patch-bundle-apply-dry-run",
+                json=apply_ready_preview["dry_run_request"],
+            )
+            self.assertEqual(dry_run_response.status_code, 200)
+
+            dry_run_events = self.client.post(f"/agent-session/{task_id}/events?after={cursor}")
+            self.assertEqual(dry_run_events.status_code, 200)
+            dry_run_payload = dry_run_events.json()
+            self.assertEqual(dry_run_payload["events"][-1]["event_type"], "dry_run_verified")
+            self.assertEqual(
+                dry_run_payload["execution_state"]["current_stage"],
+                "dry_run_verified",
+            )
+            cursor = dry_run_payload["next_cursor"]
+
+            apply_request = dict(apply_ready_preview["final_apply_request"])
+            apply_request["receipt_token"] = dry_run_response.json()["dry_run_receipt"]["receipt_token"]
+            apply_response = self.client.post(
+                "/code-patch-bundle-apply",
+                json=apply_request,
+            )
+            self.assertEqual(apply_response.status_code, 200)
+
+            applied_events = self.client.get(f"/agent-session/{task_id}/events?after={cursor}")
+            self.assertEqual(applied_events.status_code, 200)
+            applied_payload = applied_events.json()
+            self.assertEqual(applied_payload["events"][-1]["event_type"], "applied")
+            self.assertEqual(
+                applied_payload["execution_state"]["current_stage"],
+                "applied",
+            )
 
     def test_agent_session_resume_continues_after_approval(self):
         create_response = self.client.post(
@@ -478,13 +714,65 @@ class ApiContractTests(unittest.TestCase):
 
         resumed_payload = resume_response.json()
         self.assertEqual(resumed_payload["status"], "completed")
+        self.assertEqual(resumed_payload["steps"][-6]["tool_name"], "stage_editor_execution_package")
+        self.assertEqual(resumed_payload["steps"][-5]["tool_name"], "stage_apply_ready_preview")
+        self.assertEqual(resumed_payload["steps"][-4]["tool_name"], "stage_validation_commands")
         self.assertEqual(resumed_payload["steps"][-3]["tool_name"], "prepare_editor_handoff")
-        self.assertEqual(resumed_payload["steps"][-2]["tool_name"], "plan_supporting_assets")
-        self.assertEqual(resumed_payload["steps"][-1]["tool_name"], "draft_supporting_asset_scaffolds")
+        self.assertEqual(resumed_payload["steps"][-2]["tool_name"], "draft_supporting_asset_scaffolds")
+        self.assertEqual(resumed_payload["steps"][-1]["tool_name"], "summarize_progress")
         self.assertEqual(resumed_payload["available_tools"], [])
         self.assertEqual(resumed_payload["result"]["next_action"], "apply_in_editor_and_validate")
         self.assertEqual(resumed_payload["result"]["followup_asset_plans"][0]["recommended_name"], "IA_Sprint")
         self.assertEqual(resumed_payload["result"]["followup_asset_plans"][1]["recommended_name"], "IMC_PlayerDefault")
+        self.assertEqual(
+            resumed_payload["result"]["editor_execution_package"]["approved_editor_action"]["action_type"],
+            "apply_code_patch_bundle_preview",
+        )
+        self.assertEqual(
+            resumed_payload["result"]["apply_ready_preview"]["action_type"],
+            "apply_code_patch_bundle_preview",
+        )
+        self.assertEqual(
+            resumed_payload["result"]["apply_ready_preview"]["dry_run_route"],
+            "/code-patch-bundle-apply-dry-run",
+        )
+        self.assertEqual(
+            resumed_payload["result"]["apply_ready_preview"]["dry_run_request"]["files"][0]["target_path"],
+            "Source/MyGame/Public/Player/MyPlayerCharacter.h",
+        )
+        self.assertEqual(
+            resumed_payload["result"]["apply_ready_preview"]["final_apply_route"],
+            "/code-patch-bundle-apply",
+        )
+        self.assertTrue(
+            resumed_payload["result"]["apply_ready_preview"]["final_apply_request"]["dry_run_verified"]
+        )
+        self.assertEqual(
+            resumed_payload["result"]["apply_ready_preview"]["final_apply_request"]["verification_token"],
+            resumed_payload["result"]["apply_ready_preview"]["verification_bundle"]["verification_token"],
+        )
+        self.assertEqual(
+            resumed_payload["result"]["apply_ready_preview"]["session_approval"]["task_id"],
+            task_id,
+        )
+        self.assertEqual(
+            resumed_payload["result"]["apply_ready_preview"]["final_apply_request"]["approval_token"],
+            resumed_payload["result"]["apply_ready_preview"]["session_approval"]["approval_token"],
+        )
+        self.assertTrue(
+            resumed_payload["result"]["apply_ready_preview"]["dry_run_receipt"]["required_for_final_apply"]
+        )
+        self.assertIsNone(
+            resumed_payload["result"]["apply_ready_preview"]["final_apply_request"]["receipt_token"]
+        )
+        self.assertEqual(
+            resumed_payload["result"]["validation_commands"][0]["kind"],
+            "verify_targets",
+        )
+        self.assertEqual(
+            resumed_payload["result"]["validation_commands"][1]["command"],
+            ".\\venv\\Scripts\\python.exe -m unittest tests.test_api_contracts",
+        )
         self.assertEqual(resumed_payload["result"]["supporting_asset_scaffolds"][0]["asset_kind"], "input_action")
         self.assertEqual(
             resumed_payload["result"]["supporting_asset_scaffolds"][0]["editor_action"]["action_type"],
@@ -493,6 +781,19 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(
             resumed_payload["result"]["supporting_asset_scaffolds"][1]["editor_action"]["arguments"]["package_path"],
             "/Game/Input/Contexts",
+        )
+        self.assertEqual(resumed_payload["orchestration"]["phase"], "completed")
+        self.assertEqual(resumed_payload["orchestration"]["progress"]["current"], None)
+        self.assertEqual(
+            resumed_payload["orchestration"]["execution_state"]["current_stage"],
+            "approved_waiting_for_dry_run",
+        )
+        self.assertEqual(
+            resumed_payload["orchestration"]["execution_state"]["next_required_action"],
+            "code_patch_bundle_apply_dry_run",
+        )
+        self.assertTrue(
+            any(item["tool_name"] == "prepare_editor_handoff" for item in resumed_payload["orchestration"]["execution_trace"])
         )
 
     def test_agent_session_confirm_and_continue_collapses_approve_and_resume(self):
@@ -511,14 +812,24 @@ class ApiContractTests(unittest.TestCase):
 
         payload = continue_response.json()
         self.assertEqual(payload["status"], "completed")
-        self.assertEqual(payload["steps"][-4]["tool_name"], "resolve_confirmation")
+        self.assertEqual(payload["steps"][-7]["tool_name"], "resolve_confirmation")
+        self.assertEqual(payload["steps"][-6]["tool_name"], "stage_editor_execution_package")
+        self.assertEqual(payload["steps"][-5]["tool_name"], "stage_apply_ready_preview")
+        self.assertEqual(payload["steps"][-4]["tool_name"], "stage_validation_commands")
         self.assertEqual(payload["steps"][-3]["tool_name"], "prepare_editor_handoff")
-        self.assertEqual(payload["steps"][-2]["tool_name"], "plan_supporting_assets")
-        self.assertEqual(payload["steps"][-1]["tool_name"], "draft_supporting_asset_scaffolds")
+        self.assertEqual(payload["steps"][-2]["tool_name"], "draft_supporting_asset_scaffolds")
+        self.assertEqual(payload["steps"][-1]["tool_name"], "summarize_progress")
         self.assertEqual(payload["available_tools"], [])
         self.assertEqual(payload["result"]["next_action"], "apply_in_editor_and_validate")
         self.assertEqual(payload["approved_editor_action"]["action_type"], "apply_code_patch_bundle_preview")
+        self.assertEqual(payload["result"]["editor_execution_package"]["goal"], "add sprint input and hook it to the player character")
+        self.assertEqual(payload["result"]["apply_ready_preview"]["requires_confirmation"], True)
+        self.assertEqual(payload["result"]["apply_ready_preview"]["dry_run_route"], "/code-patch-bundle-apply-dry-run")
+        self.assertEqual(payload["result"]["apply_ready_preview"]["final_apply_route"], "/code-patch-bundle-apply")
+        self.assertEqual(payload["result"]["apply_ready_preview"]["final_apply_request"]["task_id"], task_id)
+        self.assertIsNone(payload["result"]["apply_ready_preview"]["final_apply_request"]["receipt_token"])
         self.assertEqual(payload["result"]["followup_asset_plans"][0]["recommended_name"], "IA_Sprint")
+        self.assertEqual(payload["orchestration"]["phase"], "completed")
 
     def test_agent_session_completes_without_confirmation_for_non_code_goal(self):
         response = self.client.post(
@@ -535,6 +846,103 @@ class ApiContractTests(unittest.TestCase):
             "plan_task",
         ])
         self.assertEqual(payload["available_tools"], [])
+        self.assertEqual(payload["orchestration"]["phase"], "completed")
+        self.assertEqual(payload["orchestration"]["proposed_plan"][0]["state"], "completed")
+        self.assertEqual(payload["steps"][-1]["tool_name"], "summarize_progress")
+
+    def test_agent_session_step_advances_one_tool_at_a_time(self):
+        create_response = self.client.post(
+            "/agent-session",
+            json={"goal": "add sprint input and hook it to the player character", "auto_run": False},
+        )
+        self.assertEqual(create_response.status_code, 200)
+        created_payload = create_response.json()
+        task_id = created_payload["task_id"]
+
+        self.assertEqual(created_payload["status"], "running")
+        self.assertEqual(created_payload["steps"], [])
+        self.assertEqual(created_payload["available_tools"], ["inspect_project_context"])
+        self.assertEqual(created_payload["orchestration"]["ranked_candidates"][0]["tool_name"], "inspect_project_context")
+
+        first_step = self.client.post(f"/agent-session/{task_id}/step")
+        self.assertEqual(first_step.status_code, 200)
+        first_payload = first_step.json()
+        self.assertEqual(first_payload["steps"][-1]["tool_name"], "inspect_project_context")
+        self.assertEqual(first_payload["available_tools"], ["plan_task"])
+        self.assertEqual(first_payload["orchestration"]["ranked_candidates"][0]["tool_name"], "plan_task")
+
+        second_step = self.client.post(f"/agent-session/{task_id}/step")
+        self.assertEqual(second_step.status_code, 200)
+        second_payload = second_step.json()
+        self.assertEqual(second_payload["steps"][-1]["tool_name"], "plan_task")
+        self.assertEqual(second_payload["available_tools"], ["search_project"])
+        self.assertEqual(second_payload["subtasks"][2]["tool_name"], "search_project")
+        self.assertEqual(second_payload["orchestration"]["tool_catalog"][0]["input_schema"]["properties"]["goal"]["type"], "string")
+        self.assertEqual(second_payload["subtasks"][7]["tool_name"], "request_confirmation")
+        self.assertEqual(second_payload["orchestration"]["ranked_candidates"][0]["tool_name"], "search_project")
+
+    def test_agent_session_registry_planning_keeps_investigation_flow_narrow(self):
+        response = self.client.post(
+            "/agent-session",
+            json={"goal": "explain the player character ownership and linked assets"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        planned_tools = [item["tool_name"] for item in payload["subtasks"]]
+        self.assertIn("search_project", planned_tools)
+        self.assertIn("analyze_selection", planned_tools)
+        self.assertNotIn("request_confirmation", planned_tools)
+        self.assertNotIn("draft_code_patch_bundle", planned_tools)
+        self.assertIn("search_project", payload["context"]["tool_preferences"]["preferred_tools"])
+        self.assertIn("draft_code_patch_bundle", payload["context"]["tool_preferences"]["suppressed_tools"])
+        self.assertIn("analyze_selection", payload["context"]["tool_preferences"]["stop_after_tools"])
+
+    def test_planner_preferences_influence_ranked_candidates_for_investigation(self):
+        create_response = self.client.post(
+            "/agent-session",
+            json={"goal": "explain the player character ownership and linked assets", "auto_run": False},
+        )
+        self.assertEqual(create_response.status_code, 200)
+        task_id = create_response.json()["task_id"]
+
+        self.client.post(f"/agent-session/{task_id}/step")
+        second_step = self.client.post(f"/agent-session/{task_id}/step")
+        self.assertEqual(second_step.status_code, 200)
+        payload = second_step.json()
+
+        self.assertEqual(payload["steps"][-1]["tool_name"], "plan_task")
+        self.assertEqual(payload["context"]["tool_preferences"]["score_boosts"]["search_project"], 120)
+        self.assertEqual(payload["orchestration"]["ranked_candidates"][0]["tool_name"], "search_project")
+
+    def test_planner_gating_requires_search_results_before_read_context(self):
+        create_response = self.client.post(
+            "/agent-session",
+            json={"goal": "add sprint input and hook it to the player character", "auto_run": False},
+        )
+        self.assertEqual(create_response.status_code, 200)
+        task_id = create_response.json()["task_id"]
+
+        self.client.post(f"/agent-session/{task_id}/step")
+        second_step = self.client.post(f"/agent-session/{task_id}/step")
+        payload = second_step.json()
+
+        ranked_tools = [item["tool_name"] for item in payload["orchestration"]["ranked_candidates"]]
+        self.assertIn("search_project", ranked_tools)
+        self.assertNotIn("read_file_context", ranked_tools)
+
+    def test_investigation_session_stops_after_analysis_stage(self):
+        response = self.client.post(
+            "/agent-session",
+            json={"goal": "explain the player character ownership and linked assets"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["steps"][-2]["tool_name"], "analyze_selection")
+        self.assertEqual(payload["steps"][-1]["tool_name"], "summarize_progress")
+        self.assertNotIn("draft_code_patch_bundle", [step["tool_name"] for step in payload["steps"]])
 
     def test_code_patch_plan_returns_preview_for_input_task(self):
         response = self.client.post(
@@ -659,6 +1067,296 @@ class ApiContractTests(unittest.TestCase):
         self.assertIn("HandleSprintCompleted", payload["combined_unified_diff"])
         self.assertEqual(payload["editor_action"]["action_type"], "apply_code_patch_bundle_preview")
         self.assertEqual(len(payload["editor_action"]["arguments"]["files"]), 2)
+
+    def test_code_patch_bundle_apply_dry_run_verifies_staged_preview(self):
+        draft_response = self.client.post(
+            "/code-patch-bundle-draft",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(draft_response.status_code, 200)
+        draft_payload = draft_response.json()
+
+        response = self.client.post(
+            "/code-patch-bundle-apply-dry-run",
+            json={"files": draft_payload["editor_action"]["arguments"]["files"]},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["execution_mode"], "dry_run")
+        self.assertEqual(payload["action_type"], "apply_code_patch_bundle_preview")
+        self.assertEqual(payload["verified"], True)
+        self.assertEqual(payload["verified_files"][0]["status"], "verified")
+
+    def test_code_patch_bundle_apply_dry_run_reports_stale_hash(self):
+        draft_response = self.client.post(
+            "/code-patch-bundle-draft",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(draft_response.status_code, 200)
+        draft_payload = draft_response.json()
+        staged_files = draft_payload["editor_action"]["arguments"]["files"]
+        staged_files[0]["original_content_hash"] = "stale-hash"
+
+        response = self.client.post(
+            "/code-patch-bundle-apply-dry-run",
+            json={"files": staged_files},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["verified"], False)
+        self.assertEqual(payload["verified_files"][0]["status"], "stale")
+
+    def test_code_patch_bundle_apply_requires_verified_dry_run(self):
+        draft_response = self.client.post(
+            "/code-patch-bundle-draft",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(draft_response.status_code, 200)
+        draft_payload = draft_response.json()
+
+        response = self.client.post(
+            "/code-patch-bundle-apply",
+            json={
+                "files": draft_payload["editor_action"]["arguments"]["files"],
+                "dry_run_verified": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["error"],
+            "Run a clean dry run first and send `dry_run_verified: true` before applying.",
+        )
+
+    def test_code_patch_bundle_apply_rejects_invalid_verification_token(self):
+        draft_response = self.client.post(
+            "/code-patch-bundle-draft",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(draft_response.status_code, 200)
+        draft_payload = draft_response.json()
+
+        response = self.client.post(
+            "/code-patch-bundle-apply",
+            json={
+                "files": draft_payload["editor_action"]["arguments"]["files"],
+                "dry_run_verified": True,
+                "verification_token": "invalid-token",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["error"],
+            "The verification token does not match the staged preview payload.",
+        )
+
+    def test_code_patch_bundle_apply_dry_run_rejects_invalid_session_approval_token(self):
+        session_response = self.client.post(
+            "/agent-session",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(session_response.status_code, 200)
+        task_id = session_response.json()["task_id"]
+
+        continue_response = self.client.post(
+            f"/agent-session/{task_id}/confirm-and-continue",
+            json={"decision": "approve"},
+        )
+        self.assertEqual(continue_response.status_code, 200)
+        apply_ready_preview = continue_response.json()["result"]["apply_ready_preview"]
+
+        response = self.client.post(
+            "/code-patch-bundle-apply-dry-run",
+            json={
+                "files": apply_ready_preview["dry_run_request"]["files"],
+                "task_id": task_id,
+                "approval_token": "invalid-session-token",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["error"],
+            "The session approval token does not match the approved agent session.",
+        )
+
+    def test_code_patch_bundle_apply_requires_dry_run_receipt_for_session_scoped_apply(self):
+        session_response = self.client.post(
+            "/agent-session",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(session_response.status_code, 200)
+        task_id = session_response.json()["task_id"]
+
+        continue_response = self.client.post(
+            f"/agent-session/{task_id}/confirm-and-continue",
+            json={"decision": "approve"},
+        )
+        self.assertEqual(continue_response.status_code, 200)
+        apply_ready_preview = continue_response.json()["result"]["apply_ready_preview"]
+
+        response = self.client.post(
+            "/code-patch-bundle-apply",
+            json=apply_ready_preview["final_apply_request"],
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["error"],
+            "Session-scoped final apply requests must include the latest dry-run `receipt_token`.",
+        )
+
+    def test_code_patch_bundle_apply_accepts_latest_session_dry_run_receipt(self):
+        app_main.PROJECT_CACHE["project_path"] = None
+        app_main.PROJECT_CACHE["files"] = []
+        app_main.PROJECT_CACHE["assets"] = []
+        app_main.PROJECT_CACHE["analysis"] = None
+        app_main.PROJECT_CACHE["search_index"] = None
+
+        with TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            header_path = project_root / "Source" / "MyGame" / "Public" / "MyPlayerCharacter.h"
+            source_path = project_root / "Source" / "MyGame" / "Private" / "MyPlayerCharacter.cpp"
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            header_path.write_text(
+                """
+                UCLASS(Blueprintable)
+                class AMyPlayerCharacter : public ACharacter
+                {
+                    GENERATED_BODY()
+                public:
+                    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Movement")
+                    float MaxSprintSpeed;
+                };
+                """,
+                encoding="utf-8",
+            )
+            source_path.write_text(
+                """
+                #include "MyPlayerCharacter.h"
+                void AMyPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+                {
+                    Super::SetupPlayerInputComponent(PlayerInputComponent);
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            scan_response = self.client.post("/scan-project", json={"project_path": str(project_root)})
+            self.assertEqual(scan_response.status_code, 200)
+
+            session_response = self.client.post(
+                "/agent-session",
+                json={"goal": "add sprint input and hook it to the player character"},
+            )
+            self.assertEqual(session_response.status_code, 200)
+            task_id = session_response.json()["task_id"]
+
+            continue_response = self.client.post(
+                f"/agent-session/{task_id}/confirm-and-continue",
+                json={"decision": "approve"},
+            )
+            self.assertEqual(continue_response.status_code, 200)
+            apply_ready_preview = continue_response.json()["result"]["apply_ready_preview"]
+
+            dry_run_response = self.client.post(
+                "/code-patch-bundle-apply-dry-run",
+                json=apply_ready_preview["dry_run_request"],
+            )
+            self.assertEqual(dry_run_response.status_code, 200)
+            dry_run_payload = dry_run_response.json()
+            self.assertTrue(dry_run_payload["verified"])
+            self.assertEqual(dry_run_payload["dry_run_receipt"]["task_id"], task_id)
+            self.assertEqual(
+                app_main.AGENT_TASK_CACHE[task_id]["orchestration"]["execution_state"]["current_stage"],
+                "dry_run_verified",
+            )
+
+            apply_request = dict(apply_ready_preview["final_apply_request"])
+            apply_request["receipt_token"] = dry_run_payload["dry_run_receipt"]["receipt_token"]
+            apply_response = self.client.post(
+                "/code-patch-bundle-apply",
+                json=apply_request,
+            )
+            self.assertEqual(apply_response.status_code, 200)
+            self.assertTrue(apply_response.json()["applied"])
+            self.assertIsNone(app_main.AGENT_TASK_CACHE[task_id]["artifacts"]["session_dry_run_receipt"])
+            self.assertEqual(
+                app_main.AGENT_TASK_CACHE[task_id]["orchestration"]["execution_state"]["current_stage"],
+                "applied",
+            )
+
+    def test_code_patch_bundle_apply_writes_files_after_clean_dry_run(self):
+        app_main.PROJECT_CACHE["project_path"] = None
+        app_main.PROJECT_CACHE["files"] = []
+        app_main.PROJECT_CACHE["assets"] = []
+        app_main.PROJECT_CACHE["analysis"] = None
+        app_main.PROJECT_CACHE["search_index"] = None
+
+        with TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            header_path = project_root / "Source" / "MyGame" / "Public" / "MyPlayerCharacter.h"
+            source_path = project_root / "Source" / "MyGame" / "Private" / "MyPlayerCharacter.cpp"
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            header_path.write_text(
+                """
+                UCLASS(Blueprintable)
+                class AMyPlayerCharacter : public ACharacter
+                {
+                    GENERATED_BODY()
+                public:
+                    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Movement")
+                    float MaxSprintSpeed;
+                };
+                """,
+                encoding="utf-8",
+            )
+            source_path.write_text(
+                """
+                #include "MyPlayerCharacter.h"
+                void AMyPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+                {
+                    Super::SetupPlayerInputComponent(PlayerInputComponent);
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            scan_response = self.client.post("/scan-project", json={"project_path": str(project_root)})
+            self.assertEqual(scan_response.status_code, 200)
+
+            draft_response = self.client.post(
+                "/code-patch-bundle-draft",
+                json={"goal": "add sprint input and hook it to the player character"},
+            )
+            self.assertEqual(draft_response.status_code, 200)
+            draft_payload = draft_response.json()
+
+            dry_run_response = self.client.post(
+                "/code-patch-bundle-apply-dry-run",
+                json={"files": draft_payload["editor_action"]["arguments"]["files"]},
+            )
+            self.assertEqual(dry_run_response.status_code, 200)
+            self.assertTrue(dry_run_response.json()["verified"])
+
+            apply_response = self.client.post(
+                "/code-patch-bundle-apply",
+                json={
+                    "files": draft_payload["editor_action"]["arguments"]["files"],
+                    "dry_run_verified": True,
+                },
+            )
+            self.assertEqual(apply_response.status_code, 200)
+            apply_payload = apply_response.json()
+            self.assertTrue(apply_payload["applied"])
+            self.assertEqual(apply_payload["file_count"], len(draft_payload["editor_action"]["arguments"]["files"]))
+
+            updated_header = header_path.read_text(encoding="utf-8")
+            updated_source = source_path.read_text(encoding="utf-8")
+            combined_text = f"{updated_header}\n{updated_source}"
+            self.assertIn("IA_Sprint", combined_text)
+            self.assertIn("HandleSprintStarted", combined_text)
 
     def test_code_patch_bundle_draft_is_idempotent_after_reapplying_same_preview(self):
         first_response = self.client.post(
