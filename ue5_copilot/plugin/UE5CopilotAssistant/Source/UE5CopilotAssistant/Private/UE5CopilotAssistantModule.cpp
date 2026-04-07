@@ -2223,6 +2223,173 @@ namespace UE5CopilotAssistant
         return BuildPluginToolPayload(ToolName, FString(), FString(), FString(), FString(), FString(), ToolArgsJson);
     }
 
+    FString BuildSuggestedToolSummaryFromRequest(const TSharedPtr<FJsonObject>& RequestObject)
+    {
+        if (!RequestObject.IsValid())
+        {
+            return FString();
+        }
+
+        FString ToolName;
+        if (!RequestObject->TryGetStringField(TEXT("tool_name"), ToolName) || ToolName.IsEmpty())
+        {
+            return FString();
+        }
+
+        FString Summary = ToolName;
+        const TSharedPtr<FJsonObject>* ToolArgsObject = nullptr;
+        if (RequestObject->TryGetObjectField(TEXT("tool_args"), ToolArgsObject) && ToolArgsObject && ToolArgsObject->IsValid())
+        {
+            FString TargetPath;
+            FString Query;
+            FString AssetKind;
+            FString AssetName;
+            if ((*ToolArgsObject)->TryGetStringField(TEXT("target_path"), TargetPath) && !TargetPath.IsEmpty())
+            {
+                Summary += FString::Printf(TEXT(" -> %s"), *TargetPath);
+            }
+            else if ((*ToolArgsObject)->TryGetStringField(TEXT("query"), Query) && !Query.IsEmpty())
+            {
+                Summary += FString::Printf(TEXT(" -> %s"), *Query);
+            }
+            else if ((*ToolArgsObject)->TryGetStringField(TEXT("goal"), Query) && !Query.IsEmpty())
+            {
+                Summary += FString::Printf(TEXT(" -> %s"), *Query);
+            }
+            else if ((*ToolArgsObject)->TryGetStringField(TEXT("name"), AssetName) && !AssetName.IsEmpty())
+            {
+                (*ToolArgsObject)->TryGetStringField(TEXT("asset_kind"), AssetKind);
+                Summary += AssetKind.IsEmpty()
+                    ? FString::Printf(TEXT(" -> %s"), *AssetName)
+                    : FString::Printf(TEXT(" -> %s %s"), *AssetKind, *AssetName);
+            }
+        }
+
+        return Summary;
+    }
+
+    TSharedPtr<FJsonObject> FindFirstSuggestedPluginToolRequestInArray(const TArray<TSharedPtr<FJsonValue>>* Values)
+    {
+        if (!Values)
+        {
+            return nullptr;
+        }
+
+        for (const TSharedPtr<FJsonValue>& Value : *Values)
+        {
+            const TSharedPtr<FJsonObject> EntryObject = Value.IsValid() ? Value->AsObject() : nullptr;
+            if (!EntryObject.IsValid())
+            {
+                continue;
+            }
+
+            const TSharedPtr<FJsonObject>* RequestObject = nullptr;
+            if (EntryObject->TryGetObjectField(TEXT("suggested_plugin_tool_request"), RequestObject)
+                && RequestObject
+                && RequestObject->IsValid())
+            {
+                return *RequestObject;
+            }
+        }
+
+        return nullptr;
+    }
+
+    TSharedPtr<FJsonObject> ExtractSuggestedPluginToolRequest(const TSharedPtr<FJsonObject>& JsonObject)
+    {
+        if (!JsonObject.IsValid())
+        {
+            return nullptr;
+        }
+
+        const TSharedPtr<FJsonObject>* ExecutionReportObject = nullptr;
+        const TSharedPtr<FJsonObject>* ToolingObject = nullptr;
+        const TSharedPtr<FJsonObject>* RequestObject = nullptr;
+        const TArray<TSharedPtr<FJsonValue>>* RequestArray = nullptr;
+
+        if (JsonObject->TryGetObjectField(TEXT("execution_report"), ExecutionReportObject)
+            && ExecutionReportObject
+            && ExecutionReportObject->IsValid()
+            && (*ExecutionReportObject)->TryGetObjectField(TEXT("tooling"), ToolingObject)
+            && ToolingObject
+            && ToolingObject->IsValid())
+        {
+            if ((*ToolingObject)->TryGetObjectField(TEXT("next_plugin_tool_request"), RequestObject)
+                && RequestObject
+                && RequestObject->IsValid())
+            {
+                return *RequestObject;
+            }
+            if ((*ToolingObject)->TryGetArrayField(TEXT("proposed_plan"), RequestArray))
+            {
+                if (const TSharedPtr<FJsonObject> ProposedRequest = FindFirstSuggestedPluginToolRequestInArray(RequestArray))
+                {
+                    return ProposedRequest;
+                }
+            }
+            if ((*ToolingObject)->TryGetArrayField(TEXT("execution_trace"), RequestArray))
+            {
+                if (const TSharedPtr<FJsonObject> TraceRequest = FindFirstSuggestedPluginToolRequestInArray(RequestArray))
+                {
+                    return TraceRequest;
+                }
+            }
+        }
+
+        const TSharedPtr<FJsonObject>* OrchestrationObject = nullptr;
+        if (JsonObject->TryGetObjectField(TEXT("orchestration"), OrchestrationObject)
+            && OrchestrationObject
+            && OrchestrationObject->IsValid())
+        {
+            if ((*OrchestrationObject)->TryGetObjectField(TEXT("execution_report"), ExecutionReportObject)
+                && ExecutionReportObject
+                && ExecutionReportObject->IsValid()
+                && (*ExecutionReportObject)->TryGetObjectField(TEXT("tooling"), ToolingObject)
+                && ToolingObject
+                && ToolingObject->IsValid())
+            {
+                if ((*ToolingObject)->TryGetObjectField(TEXT("next_plugin_tool_request"), RequestObject)
+                    && RequestObject
+                    && RequestObject->IsValid())
+                {
+                    return *RequestObject;
+                }
+                if ((*ToolingObject)->TryGetArrayField(TEXT("proposed_plan"), RequestArray))
+                {
+                    if (const TSharedPtr<FJsonObject> ProposedRequest = FindFirstSuggestedPluginToolRequestInArray(RequestArray))
+                    {
+                        return ProposedRequest;
+                    }
+                }
+                if ((*ToolingObject)->TryGetArrayField(TEXT("execution_trace"), RequestArray))
+                {
+                    if (const TSharedPtr<FJsonObject> TraceRequest = FindFirstSuggestedPluginToolRequestInArray(RequestArray))
+                    {
+                        return TraceRequest;
+                    }
+                }
+            }
+
+            if ((*OrchestrationObject)->TryGetArrayField(TEXT("proposed_plan"), RequestArray))
+            {
+                if (const TSharedPtr<FJsonObject> ProposedRequest = FindFirstSuggestedPluginToolRequestInArray(RequestArray))
+                {
+                    return ProposedRequest;
+                }
+            }
+
+            if ((*OrchestrationObject)->TryGetArrayField(TEXT("execution_trace"), RequestArray))
+            {
+                if (const TSharedPtr<FJsonObject> TraceRequest = FindFirstSuggestedPluginToolRequestInArray(RequestArray))
+                {
+                    return TraceRequest;
+                }
+            }
+        }
+
+        return nullptr;
+    }
+
     FString BuildAgentTaskPayload(const FString& Goal)
     {
         const FString ProjectPath = GetCurrentProjectPathForPayload();
@@ -2875,6 +3042,15 @@ namespace UE5CopilotAssistant
             Lines.Add(FString::Printf(TEXT("Next Action: %s"), *NextAction));
         }
 
+        if (const TSharedPtr<FJsonObject> SuggestedToolRequestObject = ExtractSuggestedPluginToolRequest(JsonObject))
+        {
+            const FString SuggestedToolSummary = BuildSuggestedToolSummaryFromRequest(SuggestedToolRequestObject);
+            if (!SuggestedToolSummary.IsEmpty())
+            {
+                Lines.Add(FString::Printf(TEXT("Suggested Tool: %s"), *SuggestedToolSummary));
+            }
+        }
+
         FString ApprovedActionType;
         const TSharedPtr<FJsonObject> ApprovedEditorAction = ExtractPreviewEditorAction(JsonObject);
         if (ApprovedEditorAction.IsValid()
@@ -3001,6 +3177,18 @@ namespace UE5CopilotAssistant
                 {
                     Module->SetPreferredCodeTargetPath(PreferredTargetPath);
                 }
+
+                if (const TSharedPtr<FJsonObject> SuggestedToolRequestObject = UE5CopilotAssistant::ExtractSuggestedPluginToolRequest(JsonObject))
+                {
+                    Module->SetPendingSuggestedToolRequest(
+                        UE5CopilotAssistant::SerializeJsonObject(SuggestedToolRequestObject),
+                        UE5CopilotAssistant::BuildSuggestedToolSummaryFromRequest(SuggestedToolRequestObject)
+                    );
+                }
+                else
+                {
+                    Module->ClearPendingSuggestedToolRequest();
+                }
             }
             SyncPreviewEditorAction(JsonObject, BundleApplyTargetPathTextBox, PendingEditorActionJsonPtr, EditorActionPreview);
         }
@@ -3011,6 +3199,7 @@ namespace UE5CopilotAssistant
             {
                 Module->ClearCurrentAgentTaskId();
                 Module->ClearPendingCodePatchBundleTargets();
+                Module->ClearPendingSuggestedToolRequest();
             }
         }
 
@@ -3082,6 +3271,7 @@ namespace UE5CopilotAssistant
                     if (FUE5CopilotAssistantModule* Module = FModuleManager::GetModulePtr<FUE5CopilotAssistantModule>(TEXT("UE5CopilotAssistant")))
                     {
                         Module->ClearPendingCodePatchBundleTargets();
+                        Module->ClearPendingSuggestedToolRequest();
                     }
                     return;
                 }
@@ -6038,7 +6228,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                         [
                             SNew(SButton)
                             .Text(LOCTEXT("UE5CopilotRunSuggestedFollowup", "Run Suggested Follow-Up"))
-                            .ToolTipText(LOCTEXT("UE5CopilotRunSuggestedFollowupTooltip", "Run the first backend-suggested follow-up tool from the latest compile diagnosis."))
+                            .ToolTipText(LOCTEXT("UE5CopilotRunSuggestedFollowupTooltip", "Run the current backend-suggested follow-up tool from the latest compile diagnosis or agent session plan."))
                             .OnClicked_Lambda([this]()
                             {
                                 const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : CurrentBackendBaseUrl);

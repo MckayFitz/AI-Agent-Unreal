@@ -36,6 +36,7 @@ class AgentToolSpec:
     capability_tags: tuple[str, ...] = ()
     backend_route: str | None = None
     editor_action_types: tuple[str, ...] = ()
+    unreal_tool_names: tuple[str, ...] = ()
     planner_task_types: tuple[str, ...] = ()
     planner_when_resumed: bool = False
     planner_when_approved: bool = False
@@ -286,11 +287,16 @@ def build_initial_session(
 def execute_tool(session: Session, tool_name: str) -> None:
     tool_spec = TOOL_REGISTRY[tool_name]
     tool_input = tool_spec.build_input(session)
+    mapped_unreal_tool = resolve_primary_unreal_tool_name(session, tool_spec)
     session["orchestration"]["execution_trace"].append(
         {
             "tool_name": tool_name,
             "phase": tool_spec.phase,
             "safe_to_autorun": tool_spec.safe_to_autorun,
+            "backend_route": tool_spec.backend_route,
+            "editor_action_types": list(tool_spec.editor_action_types),
+            "unreal_tool_name": mapped_unreal_tool,
+            "suggested_plugin_tool_request": build_plugin_tool_request(session, mapped_unreal_tool),
         }
     )
     tool_output = tool_spec.run(session, tool_input)
@@ -575,8 +581,14 @@ def build_execution_report(session: Session, *, next_tool: str | None) -> dict[s
             "available_tools": deepcopy(session.get("available_tools", [])),
             "next_tool": next_tool,
             "next_tool_description": next_tool_spec.description if next_tool_spec else "",
+            "next_unreal_tool": resolve_primary_unreal_tool_name(session, next_tool_spec) if next_tool_spec else None,
+            "next_plugin_tool_request": build_plugin_tool_request(
+                session,
+                resolve_primary_unreal_tool_name(session, next_tool_spec) if next_tool_spec else None,
+            ),
             "top_ranked_candidates": deepcopy(ranked_candidates[:3]),
             "proposed_plan": deepcopy(orchestration.get("proposed_plan", [])),
+            "execution_trace": deepcopy(orchestration.get("execution_trace", [])[-6:]),
         },
         "progress": {
             "completed": progress.get("completed", 0),
@@ -607,6 +619,7 @@ def build_proposed_plan(session: Session, *, next_tool: str | None) -> list[dict
         tool_name = subtask.get("tool_name")
         if not tool_name or tool_name not in TOOL_REGISTRY:
             continue
+        tool_spec = TOOL_REGISTRY[tool_name]
         state = "completed" if tool_name in session.get("completed_tools", []) else "pending"
         if tool_name == next_tool and session.get("status") == "running":
             state = "in_progress"
@@ -617,10 +630,17 @@ def build_proposed_plan(session: Session, *, next_tool: str | None) -> list[dict
         proposed.append(
             {
                 "tool_name": tool_name,
-                "description": TOOL_REGISTRY[tool_name].description,
-                "phase": TOOL_REGISTRY[tool_name].phase,
+                "description": tool_spec.description,
+                "phase": tool_spec.phase,
                 "state": state,
                 "reason": subtask.get("reason", ""),
+                "backend_route": tool_spec.backend_route,
+                "editor_action_types": list(tool_spec.editor_action_types),
+                "unreal_tool_name": resolve_primary_unreal_tool_name(session, tool_spec),
+                "suggested_plugin_tool_request": build_plugin_tool_request(
+                    session,
+                    resolve_primary_unreal_tool_name(session, tool_spec),
+                ),
             }
         )
     return proposed
@@ -641,9 +661,97 @@ def build_tool_catalog() -> list[dict[str, Any]]:
             "capability_tags": list(tool.capability_tags),
             "backend_route": tool.backend_route,
             "editor_action_types": list(tool.editor_action_types),
+            "unreal_tool_names": list(tool.unreal_tool_names),
         }
         for tool in TOOL_SPECS
     ]
+
+
+def resolve_primary_unreal_tool_name(session: Session, tool: AgentToolSpec | None) -> str | None:
+    if not tool:
+        return None
+    task_type = ((session.get("plan") or {}).get("task_type") or "").strip().lower()
+    if tool.name == "inspect_project_context":
+        return "scan_project_context"
+    if tool.name == "search_project":
+        return "search_project_symbols"
+    if tool.name == "analyze_selection":
+        return "inspect_asset_metadata" if task_type in {"asset_edit", "asset_creation", "hybrid_feature"} else "read_current_selection"
+    if tool.name == "draft_asset_plan":
+        return "plan_asset_creation" if task_type == "asset_creation" else "plan_asset_edits"
+    if tool.name == "draft_code_patch_bundle":
+        return "plan_code_changes"
+    if tool.name == "request_confirmation":
+        return "apply_safe_editor_edits"
+    if tool.name == "stage_validation_commands":
+        return "compile_project_and_surface_errors" if task_type in {"code_change", "code_generation", "hybrid_feature"} else None
+    if tool.unreal_tool_names:
+        return tool.unreal_tool_names[0]
+    return None
+
+
+def build_plugin_tool_request(session: Session, unreal_tool_name: str | None) -> dict[str, Any] | None:
+    if not unreal_tool_name:
+        return None
+
+    candidate_asset = ((session.get("context") or {}).get("candidate_assets") or [None])[0] or {}
+    selection_name = candidate_asset.get("name", "")
+    asset_path = candidate_asset.get("relative_path") or candidate_asset.get("path", "")
+    class_name = candidate_asset.get("asset_type", "")
+    preferred_target_path = infer_preferred_target_path(session)
+
+    request: dict[str, Any] = {
+        "tool_name": unreal_tool_name,
+        "source": "agent_orchestrator",
+    }
+    if selection_name:
+        request["selection_name"] = selection_name
+    if asset_path:
+        request["asset_path"] = asset_path
+    if class_name:
+        request["class_name"] = class_name
+
+    tool_args: dict[str, Any] = {}
+    if unreal_tool_name in {"search_project_symbols", "search_project_references", "scan_project_context"}:
+        tool_args["query"] = session.get("goal", "")
+    if unreal_tool_name == "plan_code_changes":
+        tool_args["goal"] = session.get("goal", "")
+        if preferred_target_path:
+            tool_args["target_path"] = preferred_target_path
+    elif unreal_tool_name == "plan_asset_edits":
+        tool_args["change_request"] = session.get("goal", "")
+    elif unreal_tool_name == "plan_asset_creation":
+        followup_assets = (session.get("tool_state") or {}).get("followup_assets") or []
+        followup = followup_assets[0] if followup_assets else {}
+        if followup:
+            tool_args["asset_kind"] = followup.get("asset_kind", "")
+            tool_args["name"] = followup.get("recommended_name", "")
+            tool_args["purpose"] = followup.get("purpose", "")
+    elif unreal_tool_name == "apply_safe_editor_edits":
+        editor_action = (
+            session.get("approved_editor_action")
+            or ((session.get("pending_confirmation") or {}).get("editor_action"))
+            or (((session.get("artifacts") or {}).get("code_patch_bundle") or {}).get("editor_action"))
+        )
+        if editor_action:
+            tool_args["editor_action"] = deepcopy(editor_action)
+
+    if tool_args:
+        request["tool_args"] = tool_args
+    return request
+
+
+def infer_preferred_target_path(session: Session) -> str:
+    code_patch_bundle = ((session.get("artifacts") or {}).get("code_patch_bundle") or {})
+    if code_patch_bundle.get("preferred_target_path"):
+        return code_patch_bundle["preferred_target_path"]
+    selection_summary = ((session.get("context") or {}).get("selection_summary") or {})
+    if selection_summary.get("lead_file"):
+        return selection_summary["lead_file"]
+    candidate_files = ((session.get("context") or {}).get("candidate_files") or [])
+    if candidate_files:
+        return candidate_files[0].get("path", "")
+    return ""
 
 
 def finalize_session(session: Session) -> None:
@@ -1529,6 +1637,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="backend_orchestrator",
         capability_tags=("project", "context", "inventory"),
+        unreal_tool_names=("scan_project_context",),
         build_input=build_tool_input_from_goal,
         run=tool_inspect_project_context,
         can_run=can_run_inspect_project_context,
@@ -1544,6 +1653,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="backend_orchestrator",
         capability_tags=("planning", "routing", "tool-selection"),
+        unreal_tool_names=("tool_catalog",),
         build_input=build_tool_input_from_goal,
         run=tool_plan_task,
         can_run=can_run_plan_task,
@@ -1559,6 +1669,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="backend_orchestrator",
         capability_tags=("search", "symbols", "ownership"),
+        unreal_tool_names=("search_project_symbols", "search_project_references"),
         build_input=build_search_input,
         run=tool_search_project,
         can_run=can_run_search_project,
@@ -1574,6 +1685,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="backend_orchestrator",
         capability_tags=("read", "files", "context"),
+        unreal_tool_names=("search_project_references",),
         build_input=build_read_file_input,
         run=tool_read_file_context,
         can_run=can_run_read_file_context,
@@ -1589,6 +1701,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="backend_orchestrator",
         capability_tags=("selection", "asset", "ownership"),
+        unreal_tool_names=("read_current_selection", "inspect_asset_metadata"),
         build_input=build_analyze_selection_input,
         run=tool_analyze_selection,
         can_run=can_run_analyze_selection,
@@ -1605,6 +1718,7 @@ TOOL_SPECS = [
         execution_target="backend_orchestrator",
         capability_tags=("asset", "plan", "followup"),
         editor_action_types=("create_asset",),
+        unreal_tool_names=("plan_asset_creation", "plan_asset_edits"),
         build_input=build_asset_plan_input,
         run=tool_draft_asset_plan,
         can_run=can_run_draft_asset_plan,
@@ -1621,6 +1735,7 @@ TOOL_SPECS = [
         execution_target="backend_orchestrator",
         capability_tags=("code", "preview", "multi-file"),
         editor_action_types=("apply_code_patch_bundle_preview",),
+        unreal_tool_names=("plan_code_changes",),
         build_input=build_code_patch_input,
         run=tool_draft_code_patch_bundle,
         can_run=can_run_draft_code_patch_bundle,
@@ -1635,6 +1750,7 @@ TOOL_SPECS = [
         requires_confirmation=True,
         safe_to_autorun=False,
         execution_target="user_confirmation",
+        unreal_tool_names=("apply_safe_editor_edits",),
         build_input=build_confirmation_input,
         run=tool_request_confirmation,
         can_run=can_run_request_confirmation,
@@ -1650,6 +1766,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="editor_handoff",
         capability_tags=("handoff", "editor", "execution-package"),
+        unreal_tool_names=("apply_safe_editor_edits",),
         build_input=build_execution_package_input,
         run=tool_stage_editor_execution_package,
         can_run=can_run_stage_editor_execution_package,
@@ -1665,6 +1782,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="editor_handoff",
         capability_tags=("handoff", "preview", "dry-run"),
+        unreal_tool_names=("apply_safe_editor_edits",),
         build_input=build_editor_execution_artifact_input,
         run=tool_stage_apply_ready_preview,
         can_run=can_run_stage_apply_ready_preview,
@@ -1680,6 +1798,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="editor_handoff",
         capability_tags=("validation", "compile", "editor"),
+        unreal_tool_names=("compile_project_and_surface_errors",),
         build_input=build_editor_execution_artifact_input,
         run=tool_stage_validation_commands,
         can_run=can_run_stage_validation_commands,
@@ -1695,6 +1814,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="editor_handoff",
         capability_tags=("handoff", "editor", "resume"),
+        unreal_tool_names=("apply_safe_editor_edits",),
         build_input=build_resume_input,
         run=tool_prepare_editor_handoff,
         can_run=can_run_prepare_editor_handoff,
@@ -1711,6 +1831,7 @@ TOOL_SPECS = [
         execution_target="editor_handoff",
         capability_tags=("asset", "scaffold", "followup"),
         editor_action_types=("create_asset",),
+        unreal_tool_names=("plan_asset_creation",),
         build_input=lambda session: {},
         run=tool_draft_supporting_asset_scaffolds,
         can_run=can_run_draft_supporting_asset_scaffolds,
@@ -1726,6 +1847,7 @@ TOOL_SPECS = [
         safe_to_autorun=True,
         execution_target="backend_orchestrator",
         capability_tags=("reporting", "progress"),
+        unreal_tool_names=("report_compile_result",),
         build_input=build_progress_input,
         run=tool_summarize_progress,
         can_run=can_run_summarize_progress,

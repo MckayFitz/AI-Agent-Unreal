@@ -744,10 +744,29 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["orchestration"]["tool_catalog"][0]["name"], "inspect_project_context")
         self.assertEqual(payload["orchestration"]["tool_catalog"][0]["execution_target"], "backend_orchestrator")
         self.assertTrue(payload["orchestration"]["tool_catalog"][0]["capability_tags"])
+        self.assertEqual(payload["orchestration"]["tool_catalog"][0]["unreal_tool_names"][0], "scan_project_context")
         self.assertEqual(payload["orchestration"]["execution_trace"][0]["tool_name"], "inspect_project_context")
+        self.assertEqual(payload["orchestration"]["execution_trace"][0]["unreal_tool_name"], "scan_project_context")
+        self.assertEqual(
+            payload["orchestration"]["execution_trace"][0]["suggested_plugin_tool_request"]["tool_name"],
+            "scan_project_context",
+        )
         self.assertEqual(payload["orchestration"]["proposed_plan"][7]["tool_name"], "request_confirmation")
+        self.assertEqual(payload["orchestration"]["proposed_plan"][6]["unreal_tool_name"], "plan_code_changes")
+        self.assertEqual(payload["orchestration"]["proposed_plan"][7]["unreal_tool_name"], "apply_safe_editor_edits")
+        self.assertEqual(
+            payload["orchestration"]["proposed_plan"][6]["suggested_plugin_tool_request"]["tool_args"]["goal"],
+            "add sprint input and hook it to the player character",
+        )
+        self.assertEqual(
+            payload["orchestration"]["proposed_plan"][7]["suggested_plugin_tool_request"]["tool_name"],
+            "apply_safe_editor_edits",
+        )
         self.assertEqual(payload["orchestration"]["ranked_candidates"][0]["tool_name"], "confirm_agent_step")
         self.assertEqual(payload["orchestration"]["execution_report"]["tooling"]["next_tool"], "confirm_agent_step")
+        self.assertIsNone(payload["orchestration"]["execution_report"]["tooling"]["next_unreal_tool"])
+        self.assertIsNone(payload["orchestration"]["execution_report"]["tooling"]["next_plugin_tool_request"])
+        self.assertTrue(payload["orchestration"]["execution_report"]["tooling"]["execution_trace"])
         self.assertTrue(payload["orchestration"]["execution_report"]["confirmation"]["awaiting_confirmation"])
         self.assertEqual(payload["orchestration"]["execution_report"]["handoff"]["execution_state"]["current_stage"], "awaiting_confirmation")
         self.assertEqual(payload["context"]["file_contexts"][0]["path"], "Source/MyGame/Public/Player/MyPlayerCharacter.h")
@@ -769,6 +788,16 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["status"], "awaiting_confirmation")
         self.assertEqual(payload["execution_report"]["task_type"], "hybrid_feature")
         self.assertEqual(payload["execution_report"]["tooling"]["next_tool"], "confirm_agent_step")
+        self.assertIsNone(payload["execution_report"]["tooling"]["next_unreal_tool"])
+        self.assertIsNone(payload["execution_report"]["tooling"]["next_plugin_tool_request"])
+        self.assertEqual(
+            payload["execution_report"]["tooling"]["proposed_plan"][6]["unreal_tool_name"],
+            "plan_code_changes",
+        )
+        self.assertEqual(
+            payload["execution_report"]["tooling"]["proposed_plan"][6]["suggested_plugin_tool_request"]["tool_name"],
+            "plan_code_changes",
+        )
         self.assertTrue(payload["execution_report"]["project_context"]["candidate_files"])
         self.assertTrue(payload["execution_report"]["confirmation"]["pending_target_paths"])
         self.assertEqual(
