@@ -3,11 +3,17 @@
 
 #include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BTCompositeNode.h"
+#include "BehaviorTree/BTNode.h"
+#include "BehaviorTree/BlackboardData.h"
 #include "IAssetTools.h"
 #include "AssetToolsModule.h"
 #include "ContentBrowserModule.h"
 #include "Components/ActorComponent.h"
 #include "Editor.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EnhancedInput/Public/InputAction.h"
 #include "EnhancedInput/Public/InputMappingContext.h"
 #include "Engine/Blueprint.h"
@@ -21,6 +27,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "GameProjectUtils.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/FileManager.h"
 #include "Http.h"
@@ -40,6 +47,13 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "MaterialEditingLibrary.h"
+#include "NiagaraEmitter.h"
+#include "NiagaraEmitterHandle.h"
+#include "NiagaraSystem.h"
+#include "StateTree.h"
+#include "StateTreeEditorData.h"
+#include "StateTreeEditorNode.h"
+#include "StateTreeState.h"
 #include "Engine/Texture.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Serialization/JsonReader.h"
@@ -567,6 +581,462 @@ namespace UE5CopilotAssistant
         return true;
     }
 
+    UClass* ResolveNativeParentClass(const FString& ParentClassName)
+    {
+        const FString TrimmedName = ParentClassName.TrimStartAndEnd();
+        if (TrimmedName.IsEmpty())
+        {
+            return UObject::StaticClass();
+        }
+
+        if (TrimmedName.StartsWith(TEXT("/")))
+        {
+            if (UClass* LoadedClass = LoadObject<UClass>(nullptr, *TrimmedName))
+            {
+                return LoadedClass;
+            }
+        }
+
+        if (UClass* FoundClass = FindFirstObject<UClass>(*TrimmedName, EFindFirstObjectOptions::None))
+        {
+            return FoundClass;
+        }
+
+        return nullptr;
+    }
+
+    bool ResolveModuleContext(const FString& RequestedModuleName, FModuleContextInfo& OutModuleInfo, FString& OutError)
+    {
+        TArray<FModuleContextInfo> CandidateModules = GameProjectUtils::GetCurrentProjectModules();
+        CandidateModules.Append(GameProjectUtils::GetCurrentProjectPluginModules());
+        if (CandidateModules.Num() == 0)
+        {
+            OutError = TEXT("No writable project or plugin modules were found for native class generation.");
+            return false;
+        }
+
+        const FString Requested = RequestedModuleName.TrimStartAndEnd();
+        if (!Requested.IsEmpty())
+        {
+            for (const FModuleContextInfo& ModuleInfo : CandidateModules)
+            {
+                if (ModuleInfo.ModuleName.Equals(Requested, ESearchCase::IgnoreCase))
+                {
+                    OutModuleInfo = ModuleInfo;
+                    return true;
+                }
+            }
+
+            OutError = FString::Printf(TEXT("The module `%s` was not found in the current project or project plugins."), *Requested);
+            return false;
+        }
+
+        for (const FModuleContextInfo& ModuleInfo : CandidateModules)
+        {
+            if (ModuleInfo.ModuleType == EHostType::Runtime || ModuleInfo.ModuleType == EHostType::RuntimeNoCommandlet)
+            {
+                OutModuleInfo = ModuleInfo;
+                return true;
+            }
+        }
+
+        OutModuleInfo = CandidateModules[0];
+        return true;
+    }
+
+    bool CreateNativeCppClass(const FString& ClassName, const FString& ParentClassName, const FString& RequestedModuleName, FString& OutError, FString* OutCreatedHeaderPath = nullptr, FString* OutCreatedCppPath = nullptr)
+    {
+        const FString TrimmedClassName = ClassName.TrimStartAndEnd();
+        if (TrimmedClassName.IsEmpty())
+        {
+            OutError = TEXT("Native class creation requires a non-empty `class_name`.");
+            return false;
+        }
+
+        FModuleContextInfo ModuleInfo;
+        if (!ResolveModuleContext(RequestedModuleName, ModuleInfo, OutError))
+        {
+            return false;
+        }
+
+        UClass* ParentClass = ResolveNativeParentClass(ParentClassName);
+        if (!ParentClass)
+        {
+            OutError = FString::Printf(TEXT("The parent class `%s` could not be resolved in the editor."), *ParentClassName);
+            return false;
+        }
+
+        FText ValidationError;
+        const TSet<FString> DisallowedHeaderNames;
+        if (!GameProjectUtils::IsValidClassNameForCreation(TrimmedClassName, ModuleInfo, DisallowedHeaderNames, ValidationError))
+        {
+            OutError = ValidationError.ToString();
+            return false;
+        }
+
+        if (!GameProjectUtils::IsValidBaseClassForCreation(ParentClass, ModuleInfo))
+        {
+            OutError = FString::Printf(TEXT("The base class `%s` is not valid for module `%s`."), *ParentClass->GetName(), *ModuleInfo.ModuleName);
+            return false;
+        }
+
+        const FString ClassOutputPath = FPaths::Combine(ModuleInfo.ModuleSourcePath, TEXT("Public"));
+        FString HeaderFilePath;
+        FString CppFilePath;
+        FText FailReason;
+        GameProjectUtils::EReloadStatus ReloadStatus = GameProjectUtils::EReloadStatus::NotReloaded;
+        const GameProjectUtils::EAddCodeToProjectResult Result = GameProjectUtils::AddCodeToProject(
+            TrimmedClassName,
+            ClassOutputPath,
+            ModuleInfo,
+            FNewClassInfo(ParentClass),
+            DisallowedHeaderNames,
+            HeaderFilePath,
+            CppFilePath,
+            FailReason,
+            ReloadStatus
+        );
+
+        if (Result == GameProjectUtils::EAddCodeToProjectResult::Succeeded || Result == GameProjectUtils::EAddCodeToProjectResult::FailedToHotReload)
+        {
+            if (OutCreatedHeaderPath)
+            {
+                *OutCreatedHeaderPath = HeaderFilePath;
+            }
+            if (OutCreatedCppPath)
+            {
+                *OutCreatedCppPath = CppFilePath;
+            }
+
+            if (Result == GameProjectUtils::EAddCodeToProjectResult::FailedToHotReload)
+            {
+                OutError = FailReason.IsEmpty()
+                    ? TEXT("The class files were created, but Unreal could not hot-reload them automatically.")
+                    : FailReason.ToString();
+            }
+            return true;
+        }
+
+        OutError = FailReason.IsEmpty()
+            ? TEXT("Native class creation failed inside Unreal's project generation pipeline.")
+            : FailReason.ToString();
+        return false;
+    }
+
+    bool ParseModuleHostType(const FString& ModuleTypeText, EHostType::Type& OutModuleType)
+    {
+        const FString Normalized = ModuleTypeText.TrimStartAndEnd().ToLower();
+        if (Normalized.IsEmpty() || Normalized == TEXT("runtime"))
+        {
+            OutModuleType = EHostType::Runtime;
+            return true;
+        }
+        if (Normalized == TEXT("editor"))
+        {
+            OutModuleType = EHostType::Editor;
+            return true;
+        }
+        if (Normalized == TEXT("developer"))
+        {
+            OutModuleType = EHostType::Developer;
+            return true;
+        }
+        if (Normalized == TEXT("runtimeandprogram"))
+        {
+            OutModuleType = EHostType::RuntimeAndProgram;
+            return true;
+        }
+        if (Normalized == TEXT("cookededitor"))
+        {
+            OutModuleType = EHostType::CookedOnly;
+            return true;
+        }
+        return false;
+    }
+
+    bool ParseLoadingPhase(const FString& LoadingPhaseText, ELoadingPhase::Type& OutLoadingPhase)
+    {
+        const FString Normalized = LoadingPhaseText.TrimStartAndEnd().ToLower();
+        if (Normalized.IsEmpty() || Normalized == TEXT("default"))
+        {
+            OutLoadingPhase = ELoadingPhase::Default;
+            return true;
+        }
+        if (Normalized == TEXT("postdefault"))
+        {
+            OutLoadingPhase = ELoadingPhase::PostDefault;
+            return true;
+        }
+        if (Normalized == TEXT("predafault") || Normalized == TEXT("predefault"))
+        {
+            OutLoadingPhase = ELoadingPhase::PreDefault;
+            return true;
+        }
+        if (Normalized == TEXT("postengineinit"))
+        {
+            OutLoadingPhase = ELoadingPhase::PostEngineInit;
+            return true;
+        }
+        if (Normalized == TEXT("none"))
+        {
+            OutLoadingPhase = ELoadingPhase::None;
+            return true;
+        }
+        return false;
+    }
+
+    bool CreatePluginModule(const FString& PluginName, const FString& ModuleName, const FString& ModuleTypeText, const FString& LoadingPhaseText, FString& OutError, FString* OutBuildFilePath = nullptr, FString* OutCppFilePath = nullptr, FString* OutHeaderFilePath = nullptr)
+    {
+        const FString TrimmedPluginName = PluginName.TrimStartAndEnd();
+        const FString TrimmedModuleName = ModuleName.TrimStartAndEnd();
+        if (TrimmedPluginName.IsEmpty() || TrimmedModuleName.IsEmpty())
+        {
+            OutError = TEXT("Plugin module creation requires both `plugin_name` and `module_name`.");
+            return false;
+        }
+
+        TSharedPtr<IPlugin> TargetPlugin = IPluginManager::Get().FindPlugin(TrimmedPluginName);
+        if (!TargetPlugin.IsValid() || TargetPlugin->GetLoadedFrom() != EPluginLoadedFrom::Project)
+        {
+            OutError = FString::Printf(TEXT("The project plugin `%s` was not found. Module creation is currently limited to existing project plugins."), *TrimmedPluginName);
+            return false;
+        }
+
+        FPluginDescriptor PluginDescriptor = TargetPlugin->GetDescriptor();
+        for (const FModuleDescriptor& ExistingModule : PluginDescriptor.Modules)
+        {
+            if (ExistingModule.Name.ToString().Equals(TrimmedModuleName, ESearchCase::IgnoreCase))
+            {
+                OutError = FString::Printf(TEXT("Plugin `%s` already contains a module named `%s`."), *TrimmedPluginName, *TrimmedModuleName);
+                return false;
+            }
+        }
+
+        EHostType::Type ParsedModuleType;
+        if (!ParseModuleHostType(ModuleTypeText, ParsedModuleType))
+        {
+            OutError = FString::Printf(TEXT("Unsupported module type `%s`."), *ModuleTypeText);
+            return false;
+        }
+
+        ELoadingPhase::Type ParsedLoadingPhase;
+        if (!ParseLoadingPhase(LoadingPhaseText, ParsedLoadingPhase))
+        {
+            OutError = FString::Printf(TEXT("Unsupported loading phase `%s`."), *LoadingPhaseText);
+            return false;
+        }
+
+        const FString PluginBaseDir = TargetPlugin->GetBaseDir();
+        const FString ModuleRootDir = FPaths::Combine(PluginBaseDir, TEXT("Source"), TrimmedModuleName);
+        const FString PublicDir = FPaths::Combine(ModuleRootDir, TEXT("Public"));
+        const FString PrivateDir = FPaths::Combine(ModuleRootDir, TEXT("Private"));
+        const FString BuildFilePath = FPaths::Combine(ModuleRootDir, TrimmedModuleName + TEXT(".Build.cs"));
+        const FString HeaderFilePath = FPaths::Combine(PublicDir, TrimmedModuleName + TEXT(".h"));
+        const FString CppFilePath = FPaths::Combine(PrivateDir, TrimmedModuleName + TEXT(".cpp"));
+
+        if (FPaths::FileExists(BuildFilePath) || FPaths::FileExists(HeaderFilePath) || FPaths::FileExists(CppFilePath))
+        {
+            OutError = FString::Printf(TEXT("Module files already exist for `%s` inside plugin `%s`."), *TrimmedModuleName, *TrimmedPluginName);
+            return false;
+        }
+
+        IFileManager::Get().MakeDirectory(*PublicDir, true);
+        IFileManager::Get().MakeDirectory(*PrivateDir, true);
+
+        FText FailReason;
+        const TArray<FString> PublicDependencies{TEXT("Core")};
+        const TArray<FString> PrivateDependencies{TEXT("CoreUObject"), TEXT("Engine")};
+        if (!GameProjectUtils::GeneratePluginModuleBuildFile(BuildFilePath, TrimmedModuleName, PublicDependencies, PrivateDependencies, FailReason))
+        {
+            OutError = FailReason.IsEmpty() ? TEXT("Failed to generate the plugin module Build.cs file.") : FailReason.ToString();
+            return false;
+        }
+
+        const FString StartupSource = FString::Printf(
+            TEXT("IMPLEMENT_MODULE(FDefaultModuleImpl, %s);\n"),
+            *TrimmedModuleName
+        );
+        if (!GameProjectUtils::GeneratePluginModuleCPPFile(CppFilePath, TrimmedModuleName, StartupSource, FailReason))
+        {
+            OutError = FailReason.IsEmpty() ? TEXT("Failed to generate the plugin module source file.") : FailReason.ToString();
+            return false;
+        }
+
+        const TArray<FString> PublicHeaderIncludes{TEXT("CoreMinimal.h"), TEXT("Modules/ModuleManager.h")};
+        if (!GameProjectUtils::GeneratePluginModuleHeaderFile(HeaderFilePath, PublicHeaderIncludes, FailReason))
+        {
+            OutError = FailReason.IsEmpty() ? TEXT("Failed to generate the plugin module header file.") : FailReason.ToString();
+            return false;
+        }
+
+        FModuleDescriptor NewModuleDescriptor;
+        NewModuleDescriptor.Name = FName(*TrimmedModuleName);
+        NewModuleDescriptor.Type = ParsedModuleType;
+        NewModuleDescriptor.LoadingPhase = ParsedLoadingPhase;
+        PluginDescriptor.Modules.Add(NewModuleDescriptor);
+
+        if (!TargetPlugin->UpdateDescriptor(PluginDescriptor, FailReason))
+        {
+            OutError = FailReason.IsEmpty() ? TEXT("The plugin descriptor could not be updated for the new module.") : FailReason.ToString();
+            return false;
+        }
+
+        if (OutBuildFilePath)
+        {
+            *OutBuildFilePath = BuildFilePath;
+        }
+        if (OutCppFilePath)
+        {
+            *OutCppFilePath = CppFilePath;
+        }
+        if (OutHeaderFilePath)
+        {
+            *OutHeaderFilePath = HeaderFilePath;
+        }
+        return true;
+    }
+
+    bool CreateProjectPlugin(const FString& PluginName, const FString& ModuleName, FString& OutError, FString* OutPluginFilePath = nullptr, FString* OutBuildFilePath = nullptr, FString* OutCppFilePath = nullptr, FString* OutHeaderFilePath = nullptr)
+    {
+        const FString TrimmedPluginName = PluginName.TrimStartAndEnd();
+        const FString TrimmedModuleName = ModuleName.TrimStartAndEnd();
+        if (TrimmedPluginName.IsEmpty())
+        {
+            OutError = TEXT("Plugin creation requires a non-empty `plugin_name`.");
+            return false;
+        }
+
+        FString IllegalCharacters;
+        if (!GameProjectUtils::NameContainsOnlyLegalCharacters(TrimmedPluginName, IllegalCharacters))
+        {
+            OutError = FString::Printf(TEXT("Plugin name `%s` contains illegal characters: %s"), *TrimmedPluginName, *IllegalCharacters);
+            return false;
+        }
+
+        if (IPluginManager::Get().FindPlugin(TrimmedPluginName).IsValid())
+        {
+            OutError = FString::Printf(TEXT("A plugin named `%s` already exists in this Unreal environment."), *TrimmedPluginName);
+            return false;
+        }
+
+        const FString ProjectPluginsDir = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("Plugins")));
+        const FString PluginBaseDir = FPaths::Combine(ProjectPluginsDir, TrimmedPluginName);
+        const FString PluginDescriptorPath = FPaths::Combine(PluginBaseDir, TrimmedPluginName + FPluginDescriptor::GetFileExtension());
+        if (IFileManager::Get().DirectoryExists(*PluginBaseDir) || FPaths::FileExists(PluginDescriptorPath))
+        {
+            OutError = FString::Printf(TEXT("A plugin directory already exists at `%s`."), *PluginBaseDir);
+            return false;
+        }
+
+        IFileManager::Get().MakeDirectory(*PluginBaseDir, true);
+
+        FPluginDescriptor PluginDescriptor;
+        PluginDescriptor.Version = 1;
+        PluginDescriptor.VersionName = TEXT("1.0");
+        PluginDescriptor.FriendlyName = TrimmedPluginName;
+        PluginDescriptor.Description = FString::Printf(TEXT("Plugin scaffold generated by UE5 Copilot for `%s`."), *TrimmedPluginName);
+        PluginDescriptor.Category = TEXT("Gameplay");
+        PluginDescriptor.CreatedBy = TEXT("UE5 Copilot");
+        PluginDescriptor.EnabledByDefault = EPluginEnabledByDefault::Enabled;
+        PluginDescriptor.bCanContainContent = true;
+        PluginDescriptor.bCanContainVerse = false;
+        PluginDescriptor.bIsBetaVersion = false;
+        PluginDescriptor.bIsExperimentalVersion = false;
+        PluginDescriptor.bInstalled = false;
+        PluginDescriptor.bRequiresBuildPlatform = false;
+        PluginDescriptor.bNoCode = TrimmedModuleName.IsEmpty();
+        PluginDescriptor.bExplicitlyLoaded = false;
+
+        if (!TrimmedModuleName.IsEmpty())
+        {
+            FModuleDescriptor NewModuleDescriptor;
+            NewModuleDescriptor.Name = FName(*TrimmedModuleName);
+            NewModuleDescriptor.Type = EHostType::Runtime;
+            NewModuleDescriptor.LoadingPhase = ELoadingPhase::Default;
+            PluginDescriptor.Modules.Add(NewModuleDescriptor);
+        }
+
+        FText FailReason;
+        if (!PluginDescriptor.Save(PluginDescriptorPath, FailReason))
+        {
+            OutError = FailReason.IsEmpty() ? TEXT("The plugin descriptor could not be written.") : FailReason.ToString();
+            return false;
+        }
+
+        FString BuildFilePath;
+        FString HeaderFilePath;
+        FString CppFilePath;
+        if (!TrimmedModuleName.IsEmpty())
+        {
+            const FString ModuleRootDir = FPaths::Combine(PluginBaseDir, TEXT("Source"), TrimmedModuleName);
+            const FString PublicDir = FPaths::Combine(ModuleRootDir, TEXT("Public"));
+            const FString PrivateDir = FPaths::Combine(ModuleRootDir, TEXT("Private"));
+            BuildFilePath = FPaths::Combine(ModuleRootDir, TrimmedModuleName + TEXT(".Build.cs"));
+            HeaderFilePath = FPaths::Combine(PublicDir, TrimmedModuleName + TEXT(".h"));
+            CppFilePath = FPaths::Combine(PrivateDir, TrimmedModuleName + TEXT(".cpp"));
+
+            IFileManager::Get().MakeDirectory(*PublicDir, true);
+            IFileManager::Get().MakeDirectory(*PrivateDir, true);
+
+            const TArray<FString> PublicDependencies{TEXT("Core")};
+            const TArray<FString> PrivateDependencies{TEXT("CoreUObject"), TEXT("Engine")};
+            if (!GameProjectUtils::GeneratePluginModuleBuildFile(BuildFilePath, TrimmedModuleName, PublicDependencies, PrivateDependencies, FailReason))
+            {
+                OutError = FailReason.IsEmpty() ? TEXT("Failed to generate the plugin module Build.cs file.") : FailReason.ToString();
+                return false;
+            }
+
+            const FString StartupSource = FString::Printf(
+                TEXT("IMPLEMENT_MODULE(FDefaultModuleImpl, %s);\n"),
+                *TrimmedModuleName
+            );
+            if (!GameProjectUtils::GeneratePluginModuleCPPFile(CppFilePath, TrimmedModuleName, StartupSource, FailReason))
+            {
+                OutError = FailReason.IsEmpty() ? TEXT("Failed to generate the plugin module source file.") : FailReason.ToString();
+                return false;
+            }
+
+            const TArray<FString> PublicHeaderIncludes{TEXT("CoreMinimal.h"), TEXT("Modules/ModuleManager.h")};
+            if (!GameProjectUtils::GeneratePluginModuleHeaderFile(HeaderFilePath, PublicHeaderIncludes, FailReason))
+            {
+                OutError = FailReason.IsEmpty() ? TEXT("Failed to generate the plugin module header file.") : FailReason.ToString();
+                return false;
+            }
+        }
+
+        IPluginManager& PluginManager = IPluginManager::Get();
+        PluginManager.AddPluginSearchPath(ProjectPluginsDir, false);
+
+        FText AddPluginFailReason;
+        if (!PluginManager.AddToPluginsList(PluginDescriptorPath, &AddPluginFailReason))
+        {
+            OutError = AddPluginFailReason.IsEmpty()
+                ? TEXT("The new plugin was written to disk, but Unreal could not add it to the plugin manager list.")
+                : AddPluginFailReason.ToString();
+            return false;
+        }
+
+        PluginManager.MountNewlyCreatedPlugin(TrimmedPluginName);
+
+        if (OutPluginFilePath)
+        {
+            *OutPluginFilePath = PluginDescriptorPath;
+        }
+        if (OutBuildFilePath)
+        {
+            *OutBuildFilePath = BuildFilePath;
+        }
+        if (OutCppFilePath)
+        {
+            *OutCppFilePath = CppFilePath;
+        }
+        if (OutHeaderFilePath)
+        {
+            *OutHeaderFilePath = HeaderFilePath;
+        }
+        return true;
+    }
+
     bool BuildCompileProjectInvocation(
         const FString& RequestedProjectPath,
         const FString& RequestedTargetName,
@@ -715,6 +1185,605 @@ namespace UE5CopilotAssistant
         return ExportedValue;
     }
 
+    FString DescribePinConnections(const UEdGraphNode* Node)
+    {
+        if (!Node)
+        {
+            return TEXT("0 links");
+        }
+
+        int32 LinkedPinCount = 0;
+        int32 ExecPinCount = 0;
+        TSet<const UEdGraphNode*> ConnectedNodes;
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin)
+            {
+                continue;
+            }
+
+            const int32 LinkCount = Pin->LinkedTo.Num();
+            if (LinkCount == 0)
+            {
+                continue;
+            }
+
+            LinkedPinCount += LinkCount;
+            if (Pin->PinType.PinCategory == TEXT("exec"))
+            {
+                ExecPinCount += LinkCount;
+            }
+
+            for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+            {
+                if (LinkedPin && LinkedPin->GetOwningNode())
+                {
+                    ConnectedNodes.Add(LinkedPin->GetOwningNode());
+                }
+            }
+        }
+
+        return FString::Printf(
+            TEXT("%d links, %d exec links, %d connected nodes"),
+            LinkedPinCount,
+            ExecPinCount,
+            ConnectedNodes.Num()
+        );
+    }
+
+    void AppendGraphNodeSummary(const UEdGraph* Graph, TArray<FString>& Lines, int32 MaxNodes)
+    {
+        if (!Graph)
+        {
+            return;
+        }
+
+        Lines.Add(FString::Printf(TEXT("Graph: %s"), *Graph->GetName()));
+        int32 AddedNodes = 0;
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node)
+            {
+                continue;
+            }
+
+            const FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::ListView).ToString().Replace(TEXT("\n"), TEXT(" "));
+            const FString NodeClass = Node->GetClass()->GetName();
+            Lines.Add(FString::Printf(
+                TEXT("Node: %s [%s] (%s)"),
+                NodeTitle.IsEmpty() ? *Node->GetName() : *NodeTitle,
+                *NodeClass,
+                *DescribePinConnections(Node)
+            ));
+
+            ++AddedNodes;
+            if (AddedNodes >= MaxNodes)
+            {
+                Lines.Add(TEXT("Node Export: Truncated to keep the payload compact."));
+                break;
+            }
+        }
+
+        if (AddedNodes == 0)
+        {
+            Lines.Add(TEXT("Graph Export: No nodes were found in this graph."));
+        }
+    }
+
+    FString BuildDirectBlueprintSummary(UBlueprint* Blueprint)
+    {
+        TArray<FString> Lines;
+        if (!Blueprint)
+        {
+            return TEXT("Blueprint Summary: No Blueprint object was available.");
+        }
+
+        Lines.Add(FString::Printf(TEXT("Blueprint Asset: %s"), *Blueprint->GetName()));
+        if (Blueprint->ParentClass)
+        {
+            Lines.Add(FString::Printf(TEXT("Parent Class: %s"), *Blueprint->ParentClass->GetName()));
+        }
+        if (Blueprint->GeneratedClass)
+        {
+            Lines.Add(FString::Printf(TEXT("Generated Class: %s"), *Blueprint->GeneratedClass->GetName()));
+        }
+
+        Lines.Add(FString::Printf(
+            TEXT("Blueprint Graph Counts: Event=%d Function=%d Macro=%d Delegate=%d"),
+            Blueprint->UbergraphPages.Num(),
+            Blueprint->FunctionGraphs.Num(),
+            Blueprint->MacroGraphs.Num(),
+            Blueprint->DelegateSignatureGraphs.Num()
+        ));
+
+        int32 AddedVariables = 0;
+        for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
+        {
+            const FString TypeName = Variable.VarType.PinCategory.ToString();
+            Lines.Add(FString::Printf(TEXT("Blueprint Variable: %s [%s]"), *Variable.VarName.ToString(), *TypeName));
+            ++AddedVariables;
+            if (AddedVariables >= 8)
+            {
+                Lines.Add(TEXT("Variable Export: Truncated after 8 Blueprint-defined variables."));
+                break;
+            }
+        }
+        if (AddedVariables == 0)
+        {
+            Lines.Add(TEXT("Blueprint Variable Export: No Blueprint-defined variables were detected."));
+        }
+
+        int32 GraphsAdded = 0;
+        auto AppendGraphGroup = [&Lines, &GraphsAdded](const TArray<UEdGraph*>& Graphs, const FString& Label)
+        {
+            for (UEdGraph* Graph : Graphs)
+            {
+                if (!Graph)
+                {
+                    continue;
+                }
+
+                Lines.Add(FString::Printf(TEXT("%s Summary:"), *Label));
+                AppendGraphNodeSummary(Graph, Lines, 8);
+                ++GraphsAdded;
+                if (GraphsAdded >= 4)
+                {
+                    Lines.Add(TEXT("Graph Export: Truncated after 4 graphs."));
+                    return;
+                }
+            }
+        };
+
+        AppendGraphGroup(Blueprint->UbergraphPages, TEXT("Event Graph"));
+        if (GraphsAdded < 4)
+        {
+            AppendGraphGroup(Blueprint->FunctionGraphs, TEXT("Function Graph"));
+        }
+        if (GraphsAdded < 4)
+        {
+            AppendGraphGroup(Blueprint->MacroGraphs, TEXT("Macro Graph"));
+        }
+
+        return JoinLines(Lines);
+    }
+
+    void AppendBehaviorTreeNodeSummary(const UBTNode* Node, TArray<FString>& Lines, int32 Depth, int32& InOutNodeCount, int32 MaxNodes)
+    {
+        if (!Node || InOutNodeCount >= MaxNodes)
+        {
+            return;
+        }
+
+        const FString Indent = FString::ChrN(FMath::Max(Depth, 0) * 2, TCHAR(' '));
+        Lines.Add(FString::Printf(
+            TEXT("%sBT Node: %s [%s]"),
+            *Indent,
+            *Node->GetNodeName(),
+            *Node->GetClass()->GetName()
+        ));
+        ++InOutNodeCount;
+
+        if (const UBTCompositeNode* Composite = Cast<UBTCompositeNode>(Node))
+        {
+            for (const UBTService* Service : Composite->Services)
+            {
+                if (!Service)
+                {
+                    continue;
+                }
+                Lines.Add(FString::Printf(
+                    TEXT("%s  Service: %s [%s]"),
+                    *Indent,
+                    *Service->GetNodeName(),
+                    *Service->GetClass()->GetName()
+                ));
+            }
+
+            for (const FBTCompositeChild& Child : Composite->Children)
+            {
+                for (const UBTDecorator* Decorator : Child.Decorators)
+                {
+                    if (!Decorator)
+                    {
+                        continue;
+                    }
+                    Lines.Add(FString::Printf(
+                        TEXT("%s  Decorator: %s [%s]"),
+                        *Indent,
+                        *Decorator->GetNodeName(),
+                        *Decorator->GetClass()->GetName()
+                    ));
+                }
+
+                if (Child.ChildComposite)
+                {
+                    AppendBehaviorTreeNodeSummary(Child.ChildComposite, Lines, Depth + 1, InOutNodeCount, MaxNodes);
+                }
+                else if (Child.ChildTask)
+                {
+                    AppendBehaviorTreeNodeSummary(Child.ChildTask, Lines, Depth + 1, InOutNodeCount, MaxNodes);
+                }
+
+                if (InOutNodeCount >= MaxNodes)
+                {
+                    Lines.Add(TEXT("Behavior Tree Export: Truncated after 20 nodes."));
+                    return;
+                }
+            }
+        }
+    }
+
+    FString BuildBehaviorTreeSummary(UBehaviorTree* BehaviorTree)
+    {
+        TArray<FString> Lines;
+        if (!BehaviorTree)
+        {
+            return TEXT("Behavior Tree Summary: No Behavior Tree object was available.");
+        }
+
+        Lines.Add(FString::Printf(TEXT("Behavior Tree Asset: %s"), *BehaviorTree->GetName()));
+        if (BehaviorTree->BlackboardAsset)
+        {
+            Lines.Add(FString::Printf(TEXT("Blackboard Asset: %s"), *BehaviorTree->BlackboardAsset->GetName()));
+            if (BehaviorTree->BlackboardAsset->Parent)
+            {
+                Lines.Add(FString::Printf(TEXT("Blackboard Parent: %s"), *BehaviorTree->BlackboardAsset->Parent->GetName()));
+            }
+            Lines.Add(FString::Printf(TEXT("Blackboard Key Count: %d"), BehaviorTree->BlackboardAsset->Keys.Num()));
+            for (int32 Index = 0; Index < FMath::Min(BehaviorTree->BlackboardAsset->Keys.Num(), 8); ++Index)
+            {
+                const FBlackboardEntry& Entry = BehaviorTree->BlackboardAsset->Keys[Index];
+                const FString KeyType = Entry.KeyType ? Entry.KeyType->GetClass()->GetName() : TEXT("Unknown");
+                Lines.Add(FString::Printf(TEXT("Blackboard Key: %s [%s]"), *Entry.EntryName.ToString(), *KeyType));
+            }
+        }
+        else
+        {
+            Lines.Add(TEXT("Blackboard Asset: None"));
+        }
+
+        if (BehaviorTree->RootNode)
+        {
+            int32 NodeCount = 0;
+            AppendBehaviorTreeNodeSummary(BehaviorTree->RootNode, Lines, 0, NodeCount, 20);
+            Lines.Add(FString::Printf(TEXT("Behavior Tree Node Count (summarized): %d"), NodeCount));
+        }
+        else
+        {
+            Lines.Add(TEXT("Behavior Tree Root: None"));
+        }
+
+#if WITH_EDITORONLY_DATA
+        if (BehaviorTree->BTGraph)
+        {
+            Lines.Add(TEXT("Behavior Tree Editor Graph Summary:"));
+            AppendGraphNodeSummary(BehaviorTree->BTGraph, Lines, 10);
+        }
+#endif
+
+        return JoinLines(Lines);
+    }
+
+    FString BuildNiagaraSystemSummary(UNiagaraSystem* NiagaraSystem)
+    {
+        TArray<FString> Lines;
+        if (!NiagaraSystem)
+        {
+            return TEXT("Niagara Summary: No Niagara system object was available.");
+        }
+
+        Lines.Add(FString::Printf(TEXT("Niagara System: %s"), *NiagaraSystem->GetName()));
+        const TArray<FNiagaraEmitterHandle>& EmitterHandles = NiagaraSystem->GetEmitterHandles();
+        Lines.Add(FString::Printf(TEXT("Emitter Count: %d"), EmitterHandles.Num()));
+
+        int32 AddedEmitters = 0;
+        for (const FNiagaraEmitterHandle& Handle : EmitterHandles)
+        {
+            UNiagaraEmitter* Emitter = Handle.GetInstance();
+            const FString HandleName = Handle.GetName().ToString();
+            const FString EmitterName = Emitter ? Emitter->GetName() : HandleName;
+            Lines.Add(FString::Printf(TEXT("Emitter: %s"), *EmitterName));
+
+            if (Emitter)
+            {
+                Lines.Add(FString::Printf(
+                    TEXT("  Enabled: %s"),
+                    Handle.GetIsEnabled() ? TEXT("true") : TEXT("false")
+                ));
+
+                const FString UniqueEmitterName = Emitter->GetUniqueEmitterName();
+                if (!UniqueEmitterName.IsEmpty())
+                {
+                    Lines.Add(FString::Printf(TEXT("  Unique Name: %s"), *UniqueEmitterName));
+                }
+
+                const int32 RendererCount = Emitter->GetRenderers().Num();
+                Lines.Add(FString::Printf(TEXT("  Renderer Count: %d"), RendererCount));
+
+                int32 RendererIndex = 0;
+                for (const UNiagaraRendererProperties* Renderer : Emitter->GetRenderers())
+                {
+                    if (!Renderer)
+                    {
+                        continue;
+                    }
+
+                    Lines.Add(FString::Printf(
+                        TEXT("  Renderer %d: %s"),
+                        RendererIndex,
+                        *Renderer->GetClass()->GetName()
+                    ));
+                    ++RendererIndex;
+                    if (RendererIndex >= 4)
+                    {
+                        Lines.Add(TEXT("  Renderer Export: Truncated after 4 renderers."));
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                Lines.Add(TEXT("  Emitter Instance: Not currently loaded."));
+            }
+
+            ++AddedEmitters;
+            if (AddedEmitters >= 8)
+            {
+                Lines.Add(TEXT("Niagara Export: Truncated after 8 emitters."));
+                break;
+            }
+        }
+
+        return JoinLines(Lines);
+    }
+
+    FString GetEnumValueName(const UEnum* EnumType, int64 Value, const FString& Fallback)
+    {
+        if (!EnumType)
+        {
+            return Fallback;
+        }
+
+        const FString Name = EnumType->GetNameStringByValue(Value);
+        return Name.IsEmpty() ? Fallback : Name;
+    }
+
+    FString DescribeStateTreeEditorNode(const FStateTreeEditorNode& EditorNode)
+    {
+        const UScriptStruct* NodeStruct = EditorNode.Node.GetScriptStruct();
+        const FString NodeStructName = NodeStruct ? NodeStruct->GetName() : TEXT("UnknownNode");
+        const FString NodeDisplayName = EditorNode.GetName().ToString();
+        if (NodeDisplayName.IsEmpty() || NodeDisplayName == NodeStructName)
+        {
+            return NodeStructName;
+        }
+
+        return FString::Printf(TEXT("%s [%s]"), *NodeDisplayName, *NodeStructName);
+    }
+
+    void AppendStateTreeEditorNodeList(
+        const TArray<FStateTreeEditorNode>& Nodes,
+        const TCHAR* Label,
+        TArray<FString>& Lines,
+        int32 MaxNodes,
+        const FString& Prefix = FString()
+    )
+    {
+        Lines.Add(FString::Printf(TEXT("%s%s: %d"), *Prefix, Label, Nodes.Num()));
+        const int32 NodesToShow = FMath::Min(Nodes.Num(), MaxNodes);
+        for (int32 Index = 0; Index < NodesToShow; ++Index)
+        {
+            Lines.Add(FString::Printf(
+                TEXT("%s  - %s"),
+                *Prefix,
+                *DescribeStateTreeEditorNode(Nodes[Index])
+            ));
+        }
+        if (Nodes.Num() > NodesToShow)
+        {
+            Lines.Add(FString::Printf(
+                TEXT("%s  - Truncated after %d %s entries."),
+                *Prefix,
+                NodesToShow,
+                Label
+            ));
+        }
+    }
+
+    void AppendStateTreeStateSummary(
+        const UStateTreeState* State,
+        TArray<FString>& Lines,
+        int32 Depth,
+        int32& InOutStateCount,
+        int32 MaxStates
+    )
+    {
+        if (!State || InOutStateCount >= MaxStates)
+        {
+            return;
+        }
+
+        ++InOutStateCount;
+        const FString Indent = FString::ChrN(FMath::Max(0, Depth) * 2, TCHAR(' '));
+        const FString StateName = State->Name.IsNone() ? TEXT("<UnnamedState>") : State->Name.ToString();
+        const FString StateType = GetEnumValueName(
+            StaticEnum<EStateTreeStateType>(),
+            static_cast<int64>(State->Type),
+            TEXT("Unknown")
+        );
+
+        Lines.Add(FString::Printf(
+            TEXT("%sState: %s [%s]"),
+            *Indent,
+            *StateName,
+            *StateType
+        ));
+        Lines.Add(FString::Printf(
+            TEXT("%s  Enabled=%s Selection=%s TasksCompletion=%s Children=%d Tasks=%d EnterConditions=%d Transitions=%d"),
+            *Indent,
+            State->bEnabled ? TEXT("true") : TEXT("false"),
+            *GetEnumValueName(
+                StaticEnum<EStateTreeStateSelectionBehavior>(),
+                static_cast<int64>(State->SelectionBehavior),
+                TEXT("Unknown")
+            ),
+            *GetEnumValueName(
+                StaticEnum<EStateTreeTaskCompletionType>(),
+                static_cast<int64>(State->TasksCompletion),
+                TEXT("Unknown")
+            ),
+            State->Children.Num(),
+            State->Tasks.Num(),
+            State->EnterConditions.Num(),
+            State->Transitions.Num()
+        ));
+
+        if (State->Tag.IsValid())
+        {
+            Lines.Add(FString::Printf(TEXT("%s  Tag: %s"), *Indent, *State->Tag.ToString()));
+        }
+        if (!State->Description.IsEmpty())
+        {
+            Lines.Add(FString::Printf(TEXT("%s  Description: %s"), *Indent, *State->Description.Left(120)));
+        }
+        if (State->bHasRequiredEventToEnter && State->RequiredEventToEnter.Tag.IsValid())
+        {
+            Lines.Add(FString::Printf(TEXT("%s  Required Event: %s"), *Indent, *State->RequiredEventToEnter.Tag.ToString()));
+        }
+        if (State->LinkedAsset)
+        {
+            Lines.Add(FString::Printf(TEXT("%s  Linked Asset: %s"), *Indent, *State->LinkedAsset->GetName()));
+        }
+        if (
+#if WITH_EDITORONLY_DATA
+            State->LinkedSubtree.ID.IsValid() ||
+#endif
+            State->LinkedSubtree.StateHandle.IsValid()
+        )
+        {
+            Lines.Add(FString::Printf(TEXT("%s  Linked Subtree: Present"), *Indent));
+        }
+        if (State->bHasCustomTickRate)
+        {
+            Lines.Add(FString::Printf(TEXT("%s  Custom Tick Rate: %.3fs"), *Indent, State->CustomTickRate));
+        }
+
+        AppendStateTreeEditorNodeList(State->EnterConditions, TEXT("Enter Conditions"), Lines, 4, Indent + TEXT("  "));
+        AppendStateTreeEditorNodeList(State->Tasks, TEXT("Tasks"), Lines, 6, Indent + TEXT("  "));
+        AppendStateTreeEditorNodeList(State->Considerations, TEXT("Considerations"), Lines, 4, Indent + TEXT("  "));
+
+        if (State->Transitions.Num() > 0)
+        {
+            const int32 TransitionsToShow = FMath::Min(State->Transitions.Num(), 6);
+            for (int32 TransitionIndex = 0; TransitionIndex < TransitionsToShow; ++TransitionIndex)
+            {
+                const FStateTreeTransition& Transition = State->Transitions[TransitionIndex];
+                Lines.Add(FString::Printf(
+                    TEXT("%s  Transition: Trigger=%s Type=%s Priority=%s Conditions=%d Enabled=%s"),
+                    *Indent,
+                    *GetEnumValueName(
+                        StaticEnum<EStateTreeTransitionTrigger>(),
+                        static_cast<int64>(Transition.Trigger),
+                        TEXT("Unknown")
+                    ),
+                    *GetEnumValueName(
+                        StaticEnum<EStateTreeTransitionType>(),
+                        static_cast<int64>(Transition.State.LinkType),
+                        TEXT("Unknown")
+                    ),
+                    *GetEnumValueName(
+                        StaticEnum<EStateTreeTransitionPriority>(),
+                        static_cast<int64>(Transition.Priority),
+                        TEXT("Unknown")
+                    ),
+                    Transition.Conditions.Num(),
+                    Transition.bTransitionEnabled ? TEXT("true") : TEXT("false")
+                ));
+                if (Transition.RequiredEvent.Tag.IsValid())
+                {
+                    Lines.Add(FString::Printf(
+                        TEXT("%s    Required Event: %s"),
+                        *Indent,
+                        *Transition.RequiredEvent.Tag.ToString()
+                    ));
+                }
+            }
+            if (State->Transitions.Num() > TransitionsToShow)
+            {
+                Lines.Add(FString::Printf(TEXT("%s  Transition Export: Truncated after %d transitions."), *Indent, TransitionsToShow));
+            }
+        }
+
+        for (const TObjectPtr<UStateTreeState>& ChildState : State->Children)
+        {
+            if (InOutStateCount >= MaxStates)
+            {
+                Lines.Add(TEXT("State Tree Export: Truncated after 24 states."));
+                break;
+            }
+            AppendStateTreeStateSummary(ChildState.Get(), Lines, Depth + 1, InOutStateCount, MaxStates);
+        }
+    }
+
+    FString BuildStateTreeSummary(UStateTree* StateTree)
+    {
+        TArray<FString> Lines;
+        if (!StateTree)
+        {
+            return TEXT("State Tree Summary: No State Tree object was available.");
+        }
+
+        Lines.Add(FString::Printf(TEXT("State Tree Asset: %s"), *StateTree->GetName()));
+        Lines.Add(FString::Printf(TEXT("Ready To Run: %s"), StateTree->IsReadyToRun() ? TEXT("true") : TEXT("false")));
+        if (const UStateTreeSchema* Schema = StateTree->GetSchema())
+        {
+            Lines.Add(FString::Printf(TEXT("Schema: %s"), *Schema->GetClass()->GetName()));
+        }
+        Lines.Add(FString::Printf(TEXT("Compiled Runtime State Count: %d"), StateTree->GetStates().Num()));
+        Lines.Add(FString::Printf(TEXT("Compiled Global Evaluators: %d"), StateTree->GetGlobalEvaluatorsNum()));
+        Lines.Add(FString::Printf(TEXT("Context Data Requirements: %d"), StateTree->GetContextDataDescs().Num()));
+        Lines.Add(FString::Printf(TEXT("External Data Requirements: %d"), StateTree->GetExternalDataDescs().Num()));
+        Lines.Add(FString::Printf(TEXT("Extension Count: %d"), StateTree->GetExtensions().Num()));
+
+#if WITH_EDITORONLY_DATA
+        UStateTreeEditorData* EditorData = Cast<UStateTreeEditorData>(StateTree->EditorData);
+        if (EditorData)
+        {
+            Lines.Add(TEXT("Editor Data: Present"));
+            if (EditorData->Schema)
+            {
+                Lines.Add(FString::Printf(TEXT("Editor Schema: %s"), *EditorData->Schema->GetClass()->GetName()));
+            }
+            Lines.Add(FString::Printf(TEXT("Top-Level SubTrees: %d"), EditorData->SubTrees.Num()));
+            Lines.Add(FString::Printf(TEXT("Global Evaluators: %d"), EditorData->Evaluators.Num()));
+            Lines.Add(FString::Printf(TEXT("Global Tasks: %d"), EditorData->GlobalTasks.Num()));
+            Lines.Add(FString::Printf(TEXT("Color Options: %d"), EditorData->Colors.Num()));
+
+            AppendStateTreeEditorNodeList(EditorData->Evaluators, TEXT("Global Evaluators"), Lines, 6);
+            AppendStateTreeEditorNodeList(EditorData->GlobalTasks, TEXT("Global Tasks"), Lines, 6);
+
+            int32 StateCount = 0;
+            for (const TObjectPtr<UStateTreeState>& RootState : EditorData->SubTrees)
+            {
+                AppendStateTreeStateSummary(RootState.Get(), Lines, 0, StateCount, 24);
+                if (StateCount >= 24)
+                {
+                    break;
+                }
+            }
+            Lines.Add(FString::Printf(TEXT("State Tree State Count (summarized): %d"), StateCount));
+        }
+        else
+        {
+            Lines.Add(TEXT("Editor Data: Missing or not loaded; using compiled runtime State Tree data only."));
+        }
+#else
+        Lines.Add(TEXT("Editor Data: Not available in this build configuration."));
+#endif
+
+        return JoinLines(Lines);
+    }
+
     FString BuildReflectedAssetSummary(const FAssetData& AssetData)
     {
         const FString AssetName = AssetData.AssetName.ToString();
@@ -734,6 +1803,26 @@ namespace UE5CopilotAssistant
         }
 
         Lines.Add(FString::Printf(TEXT("Loaded Class: %s"), *AssetObject->GetClass()->GetName()));
+        if (UBlueprint* Blueprint = Cast<UBlueprint>(AssetObject))
+        {
+            Lines.Add(TEXT("Direct Blueprint Extraction: The plugin inspected live Blueprint graph and variable data from the current editor asset."));
+            Lines.Add(BuildDirectBlueprintSummary(Blueprint));
+        }
+        if (UBehaviorTree* BehaviorTree = Cast<UBehaviorTree>(AssetObject))
+        {
+            Lines.Add(TEXT("Direct Behavior Tree Extraction: The plugin inspected live Behavior Tree structure from the current editor asset."));
+            Lines.Add(BuildBehaviorTreeSummary(BehaviorTree));
+        }
+        if (UNiagaraSystem* NiagaraSystem = Cast<UNiagaraSystem>(AssetObject))
+        {
+            Lines.Add(TEXT("Direct Niagara Extraction: The plugin inspected live Niagara system and emitter data from the current editor asset."));
+            Lines.Add(BuildNiagaraSystemSummary(NiagaraSystem));
+        }
+        if (UStateTree* StateTree = Cast<UStateTree>(AssetObject))
+        {
+            Lines.Add(TEXT("Direct State Tree Extraction: The plugin inspected live State Tree editor/runtime data from the current editor asset."));
+            Lines.Add(BuildStateTreeSummary(StateTree));
+        }
 
         const FString LoweredAssetClassName = AssetClassName.ToLower();
         const FString LoweredAssetName = AssetName.ToLower();
@@ -1044,6 +2133,51 @@ namespace UE5CopilotAssistant
     FString BuildPluginToolCompilePayload()
     {
         return BuildPluginToolPayload(TEXT("compile_project_and_surface_errors"), FString(), FString(), FString(), FString());
+    }
+
+    FString BuildPluginToolSearchReferencesPayload(
+        const FString& SelectionName,
+        const FString& SelectionType,
+        const FString& AssetPath,
+        const FString& ClassName,
+        const FString& Query)
+    {
+        const FString ToolArgsJson = FString::Printf(
+            TEXT("{\"query\":\"%s\"}"),
+            *EscapeJson(Query)
+        );
+        return BuildPluginToolPayload(TEXT("search_project_references"), SelectionName, SelectionType, AssetPath, ClassName, FString(), ToolArgsJson);
+    }
+
+    FString BuildPluginToolCreateCppClassPayload(const FString& ClassName, const FString& ParentClass, const FString& ModuleName)
+    {
+        const FString ToolArgsJson = FString::Printf(
+            TEXT("{\"class_name\":\"%s\",\"parent_class\":\"%s\",\"module_name\":\"%s\"}"),
+            *EscapeJson(ClassName),
+            *EscapeJson(ParentClass),
+            *EscapeJson(ModuleName)
+        );
+        return BuildPluginToolPayload(TEXT("create_cpp_class"), FString(), FString(), FString(), FString(), FString(), ToolArgsJson);
+    }
+
+    FString BuildPluginToolCreatePluginPayload(const FString& PluginName, const FString& ModuleName)
+    {
+        const FString ToolArgsJson = FString::Printf(
+            TEXT("{\"plugin_name\":\"%s\",\"module_name\":\"%s\"}"),
+            *EscapeJson(PluginName),
+            *EscapeJson(ModuleName)
+        );
+        return BuildPluginToolPayload(TEXT("create_plugin"), FString(), FString(), FString(), FString(), FString(), ToolArgsJson);
+    }
+
+    FString BuildPluginToolCreateModulePayload(const FString& ModuleName, const FString& PluginName)
+    {
+        const FString ToolArgsJson = FString::Printf(
+            TEXT("{\"module_name\":\"%s\",\"plugin_name\":\"%s\"}"),
+            *EscapeJson(ModuleName),
+            *EscapeJson(PluginName)
+        );
+        return BuildPluginToolPayload(TEXT("create_module"), FString(), FString(), FString(), FString(), FString(), ToolArgsJson);
     }
 
     FString BuildPluginToolCompileResultPayload(
@@ -3183,6 +4317,67 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                     .Padding(4.0f, 0.0f, 0.0f, 0.0f)
                     [
                         SNew(SButton)
+                        .Text(LOCTEXT("UE5CopilotSearchSelectionReferences", "Search References"))
+                        .ToolTipText(LOCTEXT("UE5CopilotSearchSelectionReferencesTooltip", "Search code and asset references for the current selection or the current prompt."))
+                        .OnClicked_Lambda([this]()
+                        {
+                            const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                            const FString PromptQuery = PromptTextBoxPtr.IsValid() ? PromptTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                            if (BaseUrl.IsEmpty())
+                            {
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingBaseUrlSearchReferences", "Enter a backend base URL first."));
+                                }
+                                return FReply::Handled();
+                            }
+                            CurrentBackendBaseUrl = BaseUrl;
+
+                            FString SelectionName, SelectionType, AssetPath, ClassName;
+                            const bool bHasSelection = UE5CopilotAssistant::GetCurrentSelection(SelectionName, SelectionType, AssetPath, ClassName);
+                            const FString Query = !PromptQuery.IsEmpty() ? PromptQuery : (SelectionName.IsEmpty() ? AssetPath : SelectionName);
+                            if (!bHasSelection && Query.IsEmpty())
+                            {
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusMissingSearchReferenceContext", "Select an asset or enter a search query in the prompt box first."));
+                                }
+                                return FReply::Handled();
+                            }
+
+                            if (SelectionPreviewTextPtr.IsValid())
+                            {
+                                SelectionPreviewTextPtr->SetText(
+                                    bHasSelection
+                                        ? FText::FromString(FString::Printf(TEXT("Current selection: %s [%s]"), *SelectionName, *SelectionType))
+                                        : LOCTEXT("UE5CopilotSelectionNone", "Current selection: none")
+                                );
+                            }
+                            if (StatusTextPtr.IsValid())
+                            {
+                                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusSearchingReferences", "Searching project references and ownership paths..."));
+                            }
+
+                            EnsureBackendAndSendRequest(
+                                BaseUrl + TEXT("/plugin/tool"),
+                                UE5CopilotAssistant::BuildPluginToolSearchReferencesPayload(SelectionName, SelectionType, AssetPath, ClassName, Query),
+                                OutputTextBoxPtr,
+                                AgentSessionTextBoxPtr,
+                                CodeDiffPreviewTextBoxPtr,
+                                EditorActionPreviewTextBoxPtr,
+                                BundleApplyTargetPathTextBoxPtr,
+                                &PendingEditorActionJson,
+                                StatusTextPtr
+                            );
+                            return FReply::Handled();
+                        })
+                    ]
+
+                    + SHorizontalBox::Slot()
+                    .FillWidth(1.0f)
+                    .Padding(4.0f, 0.0f, 0.0f, 0.0f)
+                    [
+                        SNew(SButton)
                         .Text(LOCTEXT("UE5CopilotPlanAssetEdit", "Suggest Changes For Selected Asset"))
                         .ToolTipText(LOCTEXT("UE5CopilotPlanAssetEditTooltip", "Use the text box above as your requested change, then generate a plan for the selected asset."))
                         .OnClicked_Lambda([this]()
@@ -3244,6 +4439,193 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
 
                                 ]
                             ]
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(0.0f, 0.0f, 0.0f, 4.0f)
+                [
+                    SNew(SExpandableArea)
+                    .InitiallyCollapsed(true)
+                    .AreaTitle(LOCTEXT("UE5CopilotNativeCodeHeader", "Create Native Unreal Code"))
+                    .BodyContent()
+                    [
+                        SNew(SVerticalBox)
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SNew(STextBlock)
+                            .Text(LOCTEXT("UE5CopilotNativeCodeHelp", "Prepare confirmation-gated actions for new C++ classes, plugins, and modules through the normalized tool route."))
+                            .AutoWrapText(true)
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SAssignNew(NativeClassNameTextBoxPtr, SEditableTextBox)
+                            .HintText(LOCTEXT("UE5CopilotNativeClassNameHint", "Class or plugin name, for example SprintComponent or CombatTools"))
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SAssignNew(NativeParentClassTextBoxPtr, SEditableTextBox)
+                            .HintText(LOCTEXT("UE5CopilotNativeParentClassHint", "Parent class for C++ class creation, for example UActorComponent"))
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 6.0f)
+                        [
+                            SAssignNew(NativeModuleNameTextBoxPtr, SEditableTextBox)
+                            .HintText(LOCTEXT("UE5CopilotNativeModuleNameHint", "Module name, for example MyGame or CombatRuntime"))
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                        [
+                            SAssignNew(NativePluginNameTextBoxPtr, SEditableTextBox)
+                            .HintText(LOCTEXT("UE5CopilotNativePluginNameHint", "Optional plugin name for module creation, or the plugin to create"))
+                        ]
+
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0.0f, 0.0f, 0.0f, 8.0f)
+                        [
+                            SNew(SHorizontalBox)
+
+                            + SHorizontalBox::Slot()
+                            .FillWidth(1.0f)
+                            .Padding(0.0f, 0.0f, 4.0f, 0.0f)
+                            [
+                                SNew(SButton)
+                                .Text(LOCTEXT("UE5CopilotCreateCppClass", "Create C++ Class"))
+                                .ToolTipText(LOCTEXT("UE5CopilotCreateCppClassTooltip", "Prepare a confirmation-gated editor action for a new Unreal C++ class."))
+                                .OnClicked_Lambda([this]()
+                                {
+                                    const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                                    const FString ClassName = NativeClassNameTextBoxPtr.IsValid() ? NativeClassNameTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                    const FString ParentClass = NativeParentClassTextBoxPtr.IsValid() ? NativeParentClassTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                    const FString ModuleName = NativeModuleNameTextBoxPtr.IsValid() ? NativeModuleNameTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                    if (BaseUrl.IsEmpty() || ClassName.IsEmpty())
+                                    {
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingCreateCppClassInput", "Enter a backend base URL and a class name first."));
+                                        }
+                                        return FReply::Handled();
+                                    }
+
+                                    CurrentBackendBaseUrl = BaseUrl;
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotPreparingCreateCppClass", "Preparing a C++ class creation action..."));
+                                    }
+
+                                    EnsureBackendAndSendRequest(
+                                        BaseUrl + TEXT("/plugin/tool"),
+                                        UE5CopilotAssistant::BuildPluginToolCreateCppClassPayload(ClassName, ParentClass, ModuleName),
+                                        OutputTextBoxPtr,
+                                        AgentSessionTextBoxPtr,
+                                        CodeDiffPreviewTextBoxPtr,
+                                        EditorActionPreviewTextBoxPtr,
+                                        BundleApplyTargetPathTextBoxPtr,
+                                        &PendingEditorActionJson,
+                                        StatusTextPtr
+                                    );
+                                    return FReply::Handled();
+                                })
+                            ]
+
+                            + SHorizontalBox::Slot()
+                            .FillWidth(1.0f)
+                            .Padding(4.0f, 0.0f, 4.0f, 0.0f)
+                            [
+                                SNew(SButton)
+                                .Text(LOCTEXT("UE5CopilotCreatePlugin", "Create Plugin"))
+                                .ToolTipText(LOCTEXT("UE5CopilotCreatePluginTooltip", "Prepare a confirmation-gated editor action for a new Unreal plugin."))
+                                .OnClicked_Lambda([this]()
+                                {
+                                    const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                                    const FString PluginName = NativePluginNameTextBoxPtr.IsValid() ? NativePluginNameTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                    const FString ModuleName = NativeModuleNameTextBoxPtr.IsValid() ? NativeModuleNameTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                    if (BaseUrl.IsEmpty() || PluginName.IsEmpty())
+                                    {
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingCreatePluginInput", "Enter a backend base URL and a plugin name first."));
+                                        }
+                                        return FReply::Handled();
+                                    }
+
+                                    CurrentBackendBaseUrl = BaseUrl;
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotPreparingCreatePlugin", "Preparing a plugin creation action..."));
+                                    }
+
+                                    EnsureBackendAndSendRequest(
+                                        BaseUrl + TEXT("/plugin/tool"),
+                                        UE5CopilotAssistant::BuildPluginToolCreatePluginPayload(PluginName, ModuleName),
+                                        OutputTextBoxPtr,
+                                        AgentSessionTextBoxPtr,
+                                        CodeDiffPreviewTextBoxPtr,
+                                        EditorActionPreviewTextBoxPtr,
+                                        BundleApplyTargetPathTextBoxPtr,
+                                        &PendingEditorActionJson,
+                                        StatusTextPtr
+                                    );
+                                    return FReply::Handled();
+                                })
+                            ]
+
+                            + SHorizontalBox::Slot()
+                            .FillWidth(1.0f)
+                            .Padding(4.0f, 0.0f, 0.0f, 0.0f)
+                            [
+                                SNew(SButton)
+                                .Text(LOCTEXT("UE5CopilotCreateModule", "Create Module"))
+                                .ToolTipText(LOCTEXT("UE5CopilotCreateModuleTooltip", "Prepare a confirmation-gated editor action for a new Unreal module."))
+                                .OnClicked_Lambda([this]()
+                                {
+                                    const FString BaseUrl = UE5CopilotAssistant::NormalizeBaseUrl(BackendBaseUrlTextBoxPtr.IsValid() ? BackendBaseUrlTextBoxPtr->GetText().ToString() : FString());
+                                    const FString ModuleName = NativeModuleNameTextBoxPtr.IsValid() ? NativeModuleNameTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                    const FString PluginName = NativePluginNameTextBoxPtr.IsValid() ? NativePluginNameTextBoxPtr->GetText().ToString().TrimStartAndEnd() : FString();
+                                    if (BaseUrl.IsEmpty() || ModuleName.IsEmpty())
+                                    {
+                                        if (StatusTextPtr.IsValid())
+                                        {
+                                            StatusTextPtr->SetText(LOCTEXT("UE5CopilotMissingCreateModuleInput", "Enter a backend base URL and a module name first."));
+                                        }
+                                        return FReply::Handled();
+                                    }
+
+                                    CurrentBackendBaseUrl = BaseUrl;
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotPreparingCreateModule", "Preparing a module creation action..."));
+                                    }
+
+                                    EnsureBackendAndSendRequest(
+                                        BaseUrl + TEXT("/plugin/tool"),
+                                        UE5CopilotAssistant::BuildPluginToolCreateModulePayload(ModuleName, PluginName),
+                                        OutputTextBoxPtr,
+                                        AgentSessionTextBoxPtr,
+                                        CodeDiffPreviewTextBoxPtr,
+                                        EditorActionPreviewTextBoxPtr,
+                                        BundleApplyTargetPathTextBoxPtr,
+                                        &PendingEditorActionJson,
+                                        StatusTextPtr
+                                    );
+                                    return FReply::Handled();
+                                })
+                            ]
+                        ]
+                    ]
+                ]
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(0.0f, 0.0f, 0.0f, 4.0f)
@@ -3445,11 +4827,11 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 return FReply::Handled();
                             }
 
-                            if (ActionType != TEXT("open_asset") && ActionType != TEXT("compile_project") && ActionType != TEXT("rename_asset") && ActionType != TEXT("create_asset") && ActionType != TEXT("tweak_material_parameter") && ActionType != TEXT("apply_code_patch_preview") && ActionType != TEXT("apply_code_patch_bundle_preview"))
+                            if (ActionType != TEXT("open_asset") && ActionType != TEXT("compile_project") && ActionType != TEXT("rename_asset") && ActionType != TEXT("create_asset") && ActionType != TEXT("create_cpp_class") && ActionType != TEXT("create_plugin") && ActionType != TEXT("create_module") && ActionType != TEXT("tweak_material_parameter") && ActionType != TEXT("apply_code_patch_preview") && ActionType != TEXT("apply_code_patch_bundle_preview"))
                             {
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(FText::FromString(FString::Printf(TEXT("`%s` previewed successfully, but this plugin only executes `open_asset`, `compile_project`, `rename_asset`, a small set of safe `create_asset` actions, narrow material-instance parameter tweaks, and narrow code patch previews right now."), *ActionType)));
+                                    StatusTextPtr->SetText(FText::FromString(FString::Printf(TEXT("`%s` previewed successfully, but this plugin only executes `open_asset`, `compile_project`, `rename_asset`, `create_asset`, `create_cpp_class`, `create_plugin`, `create_module`, narrow material-instance parameter tweaks, and narrow code patch previews right now."), *ActionType)));
                                 }
                                 return FReply::Handled();
                             }
@@ -3497,6 +4879,239 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                         bOpenAssetSucceeded
                                             ? LOCTEXT("UE5CopilotOpenAssetExecuted", "Asset opened in the Unreal editor.")
                                             : FText::FromString(OpenAssetError.IsEmpty() ? TEXT("Open-asset execution failed.") : OpenAssetError)
+                                    );
+                                }
+                                return FReply::Handled();
+                            }
+
+                            if (ActionType == TEXT("create_cpp_class"))
+                            {
+                                FString ClassName;
+                                FString ParentClass;
+                                FString ModuleName;
+                                (*ArgumentsObject)->TryGetStringField(TEXT("class_name"), ClassName);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("parent_class"), ParentClass);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("module_name"), ModuleName);
+
+                                if (ClassName.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotIncompleteCreateCppClassArguments", "The native class action requires a `class_name`."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                const EAppReturnType::Type ConfirmCreateCppClassResult = FMessageDialog::Open(
+                                    EAppMsgType::OkCancel,
+                                    FText::FromString(FString::Printf(
+                                        TEXT("Create a native Unreal C++ class\n\nClass: %s\nParent: %s\nModule: %s\n\nThis action will generate new source files through Unreal's project generation APIs."),
+                                        *ClassName,
+                                        ParentClass.IsEmpty() ? TEXT("UObject") : *ParentClass,
+                                        ModuleName.IsEmpty() ? TEXT("Auto-select") : *ModuleName))
+                                );
+                                if (ConfirmCreateCppClassResult != EAppReturnType::Ok)
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotCreateCppClassCancelled", "Native C++ class creation cancelled."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                FString NativeClassError;
+                                FString CreatedHeaderPath;
+                                FString CreatedCppPath;
+                                const bool bCreateCppClassSucceeded = UE5CopilotAssistant::CreateNativeCppClass(
+                                    ClassName,
+                                    ParentClass,
+                                    ModuleName,
+                                    NativeClassError,
+                                    &CreatedHeaderPath,
+                                    &CreatedCppPath
+                                );
+                                PendingEditorActionJson.Reset();
+                                if (EditorActionPreviewTextBoxPtr.IsValid())
+                                {
+                                    EditorActionPreviewTextBoxPtr->SetText(
+                                        bCreateCppClassSucceeded
+                                            ? LOCTEXT("UE5CopilotEditorActionPreviewCreateCppClassConsumed", "Native class action executed. No previewed editor action is pending.")
+                                            : LOCTEXT("UE5CopilotEditorActionPreviewCreateCppClassFailed", "Native class execution failed. Review the status message for details.")
+                                    );
+                                }
+                                if (OutputTextBoxPtr.IsValid() && bCreateCppClassSucceeded)
+                                {
+                                    OutputTextBoxPtr->SetText(FText::FromString(FString::Printf(
+                                        TEXT("Native C++ class created.\n\nHeader: %s\nSource: %s%s"),
+                                        *CreatedHeaderPath,
+                                        *CreatedCppPath,
+                                        NativeClassError.IsEmpty() ? TEXT("") : *FString::Printf(TEXT("\n\nNote: %s"), *NativeClassError)
+                                    )));
+                                }
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(
+                                        bCreateCppClassSucceeded
+                                            ? (NativeClassError.IsEmpty()
+                                                ? LOCTEXT("UE5CopilotCreateCppClassExecuted", "Native C++ class created through Unreal project generation APIs.")
+                                                : FText::FromString(FString::Printf(TEXT("Native C++ class created, but Unreal reported a follow-up issue: %s"), *NativeClassError)))
+                                            : FText::FromString(NativeClassError.IsEmpty() ? TEXT("Native C++ class creation failed.") : NativeClassError)
+                                    );
+                                }
+                                return FReply::Handled();
+                            }
+
+                            if (ActionType == TEXT("create_plugin"))
+                            {
+                                FString PluginName;
+                                FString ModuleName;
+                                (*ArgumentsObject)->TryGetStringField(TEXT("plugin_name"), PluginName);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("module_name"), ModuleName);
+
+                                if (PluginName.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotIncompleteCreatePluginArguments", "The plugin action requires a `plugin_name`."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                const EAppReturnType::Type ConfirmCreatePluginResult = FMessageDialog::Open(
+                                    EAppMsgType::OkCancel,
+                                    FText::FromString(FString::Printf(
+                                        TEXT("Create a new Unreal project plugin\n\nPlugin: %s\nStarter Module: %s\n\nThis action will scaffold a new plugin under the current project's Plugins folder and ask Unreal to discover it immediately."),
+                                        *PluginName,
+                                        ModuleName.IsEmpty() ? TEXT("None") : *ModuleName))
+                                );
+                                if (ConfirmCreatePluginResult != EAppReturnType::Ok)
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotCreatePluginCancelled", "Plugin creation cancelled."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                FString PluginError;
+                                FString PluginFilePath;
+                                FString BuildFilePath;
+                                FString HeaderFilePath;
+                                FString CppFilePath;
+                                const bool bCreatePluginSucceeded = UE5CopilotAssistant::CreateProjectPlugin(
+                                    PluginName,
+                                    ModuleName,
+                                    PluginError,
+                                    &PluginFilePath,
+                                    &BuildFilePath,
+                                    &CppFilePath,
+                                    &HeaderFilePath
+                                );
+                                PendingEditorActionJson.Reset();
+                                if (EditorActionPreviewTextBoxPtr.IsValid())
+                                {
+                                    EditorActionPreviewTextBoxPtr->SetText(
+                                        bCreatePluginSucceeded
+                                            ? LOCTEXT("UE5CopilotEditorActionPreviewCreatePluginConsumed", "Plugin action executed. No previewed editor action is pending.")
+                                            : LOCTEXT("UE5CopilotEditorActionPreviewCreatePluginFailed", "Plugin execution failed. Review the status message for details.")
+                                    );
+                                }
+                                if (OutputTextBoxPtr.IsValid() && bCreatePluginSucceeded)
+                                {
+                                    FString Output = FString::Printf(TEXT("Project plugin created.\n\nDescriptor: %s"), *PluginFilePath);
+                                    if (!BuildFilePath.IsEmpty())
+                                    {
+                                        Output += FString::Printf(TEXT("\nBuild: %s\nHeader: %s\nSource: %s"), *BuildFilePath, *HeaderFilePath, *CppFilePath);
+                                    }
+                                    OutputTextBoxPtr->SetText(FText::FromString(Output));
+                                }
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(
+                                        bCreatePluginSucceeded
+                                            ? LOCTEXT("UE5CopilotCreatePluginExecuted", "Project plugin created and handed off to Unreal's plugin manager.")
+                                            : FText::FromString(PluginError.IsEmpty() ? TEXT("Project plugin creation failed.") : PluginError)
+                                    );
+                                }
+                                return FReply::Handled();
+                            }
+
+                            if (ActionType == TEXT("create_module"))
+                            {
+                                FString ModuleName;
+                                FString ModuleType;
+                                FString LoadingPhase;
+                                FString PluginName;
+                                (*ArgumentsObject)->TryGetStringField(TEXT("module_name"), ModuleName);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("module_type"), ModuleType);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("loading_phase"), LoadingPhase);
+                                (*ArgumentsObject)->TryGetStringField(TEXT("plugin_name"), PluginName);
+
+                                if (ModuleName.IsEmpty() || PluginName.IsEmpty())
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotIncompleteCreateModuleArguments", "The module action currently requires `module_name` and `plugin_name`."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                const EAppReturnType::Type ConfirmCreateModuleResult = FMessageDialog::Open(
+                                    EAppMsgType::OkCancel,
+                                    FText::FromString(FString::Printf(
+                                        TEXT("Create a new Unreal plugin module\n\nPlugin: %s\nModule: %s\nType: %s\nLoading Phase: %s\n\nThis action will generate module source files and update the plugin descriptor through Unreal project-generation helpers."),
+                                        *PluginName,
+                                        *ModuleName,
+                                        ModuleType.IsEmpty() ? TEXT("Runtime") : *ModuleType,
+                                        LoadingPhase.IsEmpty() ? TEXT("Default") : *LoadingPhase))
+                                );
+                                if (ConfirmCreateModuleResult != EAppReturnType::Ok)
+                                {
+                                    if (StatusTextPtr.IsValid())
+                                    {
+                                        StatusTextPtr->SetText(LOCTEXT("UE5CopilotCreateModuleCancelled", "Plugin module creation cancelled."));
+                                    }
+                                    return FReply::Handled();
+                                }
+
+                                FString ModuleError;
+                                FString BuildFilePath;
+                                FString HeaderFilePath;
+                                FString CppFilePath;
+                                const bool bCreateModuleSucceeded = UE5CopilotAssistant::CreatePluginModule(
+                                    PluginName,
+                                    ModuleName,
+                                    ModuleType,
+                                    LoadingPhase,
+                                    ModuleError,
+                                    &BuildFilePath,
+                                    &CppFilePath,
+                                    &HeaderFilePath
+                                );
+                                PendingEditorActionJson.Reset();
+                                if (EditorActionPreviewTextBoxPtr.IsValid())
+                                {
+                                    EditorActionPreviewTextBoxPtr->SetText(
+                                        bCreateModuleSucceeded
+                                            ? LOCTEXT("UE5CopilotEditorActionPreviewCreateModuleConsumed", "Module action executed. No previewed editor action is pending.")
+                                            : LOCTEXT("UE5CopilotEditorActionPreviewCreateModuleFailed", "Module execution failed. Review the status message for details.")
+                                    );
+                                }
+                                if (OutputTextBoxPtr.IsValid() && bCreateModuleSucceeded)
+                                {
+                                    OutputTextBoxPtr->SetText(FText::FromString(FString::Printf(
+                                        TEXT("Plugin module created.\n\nBuild: %s\nHeader: %s\nSource: %s"),
+                                        *BuildFilePath,
+                                        *HeaderFilePath,
+                                        *CppFilePath
+                                    )));
+                                }
+                                if (StatusTextPtr.IsValid())
+                                {
+                                    StatusTextPtr->SetText(
+                                        bCreateModuleSucceeded
+                                            ? LOCTEXT("UE5CopilotCreateModuleExecuted", "Plugin module created and descriptor updated through Unreal project-generation helpers.")
+                                            : FText::FromString(ModuleError.IsEmpty() ? TEXT("Plugin module creation failed.") : ModuleError)
                                     );
                                 }
                                 return FReply::Handled();
@@ -4339,7 +5954,7 @@ TSharedRef<SDockTab> FUE5CopilotAssistantModule::SpawnAssistantTab(const FSpawnT
                                 ExportedText = UE5CopilotAssistant::BuildReflectedAssetSummary(SelectedAssetData);
                                 if (StatusTextPtr.IsValid())
                                 {
-                                    StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusUsingFallbackDeepContext", "No pasted export text was provided, so the plugin is sending reflected property data from the selected asset."));
+                StatusTextPtr->SetText(LOCTEXT("UE5CopilotStatusUsingFallbackDeepContext", "No pasted export text was provided, so the plugin is sending direct Blueprint, Behavior Tree, Niagara, and State Tree data when available and reflected asset data otherwise."));
                                 }
                             }
                         }

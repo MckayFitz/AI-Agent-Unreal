@@ -316,6 +316,7 @@ def refresh_orchestration_state(session: Session) -> None:
     session["orchestration"]["progress"] = build_progress(session, next_tool=next_tool)
     session["orchestration"]["execution_state"] = build_execution_state(session)
     session["orchestration"]["ranked_candidates"] = ranked_candidates
+    session["orchestration"]["execution_report"] = build_execution_report(session, next_tool=next_tool)
 
 
 def select_next_tool(session: Session) -> str | None:
@@ -540,6 +541,64 @@ def build_progress(session: Session, *, next_tool: str | None) -> dict[str, Any]
     elif session.get("status") == "ready_for_editor_apply":
         current = "resume_agent_session"
     return {"completed": completed, "total": total, "current": current}
+
+
+def build_execution_report(session: Session, *, next_tool: str | None) -> dict[str, Any]:
+    context = session.get("context") or {}
+    plan = session.get("plan") or {}
+    orchestration = session.get("orchestration") or {}
+    artifacts = session.get("artifacts") or {}
+    pending_confirmation = session.get("pending_confirmation") or {}
+    approved_editor_action = session.get("approved_editor_action") or {}
+    next_tool_spec = TOOL_REGISTRY.get(next_tool) if next_tool else None
+    ranked_candidates = orchestration.get("ranked_candidates", [])
+    candidate_files = context.get("candidate_files", [])[:3]
+    candidate_assets = context.get("candidate_assets", [])[:3]
+    progress = orchestration.get("progress", {})
+    execution_state = orchestration.get("execution_state", {})
+
+    return {
+        "goal": session.get("goal", ""),
+        "status": session.get("status"),
+        "phase": orchestration.get("phase"),
+        "task_type": plan.get("task_type"),
+        "summary": (session.get("result") or {}).get("summary")
+        or artifacts.get("progress_summary")
+        or plan.get("summary", ""),
+        "project_context": {
+            "project_summary": deepcopy(context.get("project_summary")),
+            "candidate_files": deepcopy(candidate_files),
+            "candidate_assets": deepcopy(candidate_assets),
+            "selection_summary": deepcopy(context.get("selection_summary")),
+        },
+        "tooling": {
+            "available_tools": deepcopy(session.get("available_tools", [])),
+            "next_tool": next_tool,
+            "next_tool_description": next_tool_spec.description if next_tool_spec else "",
+            "top_ranked_candidates": deepcopy(ranked_candidates[:3]),
+            "proposed_plan": deepcopy(orchestration.get("proposed_plan", [])),
+        },
+        "progress": {
+            "completed": progress.get("completed", 0),
+            "total": progress.get("total", 0),
+            "current": progress.get("current"),
+            "completed_tools": deepcopy(session.get("completed_tools", [])),
+        },
+        "confirmation": {
+            "awaiting_confirmation": session.get("status") == "awaiting_confirmation",
+            "pending_action_type": (pending_confirmation.get("editor_action") or {}).get("action_type"),
+            "pending_target_paths": deepcopy(pending_confirmation.get("target_paths", [])),
+            "approved_action_type": approved_editor_action.get("action_type"),
+            "ready_for_editor_apply": session.get("status") == "ready_for_editor_apply",
+        },
+        "handoff": {
+            "execution_state": deepcopy(execution_state),
+            "has_editor_execution_package": bool(artifacts.get("editor_execution_package")),
+            "has_apply_ready_preview": bool(artifacts.get("apply_ready_preview")),
+            "validation_command_labels": [item.get("label") for item in artifacts.get("validation_commands", [])],
+            "followup_asset_names": [item.get("recommended_name") for item in session.get("tool_state", {}).get("followup_assets", [])],
+        },
+    }
 
 
 def build_proposed_plan(session: Session, *, next_tool: str | None) -> list[dict[str, Any]]:

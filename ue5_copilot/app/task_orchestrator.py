@@ -198,11 +198,15 @@ def infer_suggested_editor_actions(task_type: str, candidate_assets: list[dict[s
 
     if task_type in {"asset_creation", "hybrid_feature"}:
         actions.append("create_asset")
+        actions.append("create_cpp_class")
+        actions.append("create_module")
+        actions.append("create_plugin")
     if task_type in {"asset_edit", "hybrid_feature"}:
         actions.append("rename_asset")
         actions.append("apply_asset_edit_preview")
     if task_type in {"code_change", "code_generation", "hybrid_feature"}:
         actions.append("apply_code_patch_bundle_preview")
+        actions.append("compile_project")
     if "material_instance" in families or "material" in families:
         actions.append("tweak_material_parameter")
 
@@ -267,6 +271,19 @@ def build_unreal_tool_catalog(
             "supported_task_types": ["investigation", "code_change", "code_generation", "hybrid_feature", "task_plan"],
             "capability_tags": ["search", "references", "symbols", "ownership"],
             "summary": "Search project references, symbols, and likely ownership paths before editing.",
+        },
+        {
+            "name": "search_project_references",
+            "label": "Search asset and code references",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/tool",
+            "safe_to_autorun": True,
+            "requires_confirmation": False,
+            "mutates_project": False,
+            "supported_task_types": ["investigation", "code_change", "asset_edit", "hybrid_feature", "task_plan"],
+            "capability_tags": ["search", "references", "dependencies", "ownership"],
+            "summary": "Search inbound and outbound references for symbols, classes, files, and assets before mutating the project.",
         },
         {
             "name": "scan_project_context",
@@ -337,16 +354,74 @@ def build_unreal_tool_catalog(
             "summary": "Open the selected asset or generated follow-up assets directly inside the Unreal Editor.",
         },
         {
-            "name": "create_cpp_classes_plugins_modules",
-            "label": "Create classes/plugins/modules",
-            "status": "planned",
-            "execution_target": "plugin_action",
+            "name": "create_cpp_class",
+            "label": "Create C++ class",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/tool",
             "safe_to_autorun": False,
             "requires_confirmation": True,
             "mutates_project": True,
             "supported_task_types": ["code_generation", "hybrid_feature"],
-            "capability_tags": ["code", "class", "plugin", "module"],
-            "summary": "Create native Unreal code artifacts such as C++ classes, plugins, or modules with explicit confirmation.",
+            "capability_tags": ["code", "class", "native", "scaffold"],
+            "editor_action_types": ["create_cpp_class"],
+            "summary": "Prepare a confirmation-gated editor action to scaffold a new Unreal C++ class.",
+        },
+        {
+            "name": "create_plugin",
+            "label": "Create Unreal plugin",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/tool",
+            "safe_to_autorun": False,
+            "requires_confirmation": True,
+            "mutates_project": True,
+            "supported_task_types": ["code_generation", "hybrid_feature"],
+            "capability_tags": ["plugin", "module", "scaffold", "code"],
+            "editor_action_types": ["create_plugin"],
+            "summary": "Prepare a confirmation-gated editor action to scaffold a new Unreal plugin.",
+        },
+        {
+            "name": "create_module",
+            "label": "Create Unreal module",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/tool",
+            "safe_to_autorun": False,
+            "requires_confirmation": True,
+            "mutates_project": True,
+            "supported_task_types": ["code_generation", "hybrid_feature"],
+            "capability_tags": ["module", "build", "code", "scaffold"],
+            "editor_action_types": ["create_module"],
+            "summary": "Prepare a confirmation-gated editor action to scaffold a new Unreal module.",
+        },
+        {
+            "name": "rename_selected_asset",
+            "label": "Rename selected asset",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/tool",
+            "safe_to_autorun": False,
+            "requires_confirmation": True,
+            "mutates_project": True,
+            "supported_task_types": ["asset_edit", "hybrid_feature"],
+            "capability_tags": ["asset", "rename", "safe-edit"],
+            "editor_action_types": ["rename_asset"],
+            "summary": "Prepare a confirmation-gated rename action for the current Unreal asset selection.",
+        },
+        {
+            "name": "apply_safe_editor_edits",
+            "label": "Apply safe edits with confirmation",
+            "status": "implemented",
+            "execution_target": "backend_route",
+            "backend_route": "/plugin/tool",
+            "safe_to_autorun": False,
+            "requires_confirmation": True,
+            "mutates_project": True,
+            "supported_task_types": ["code_change", "asset_edit", "asset_creation", "hybrid_feature"],
+            "capability_tags": ["apply", "confirmation", "editor", "preview"],
+            "editor_action_types": ["apply_code_patch_bundle_preview", "rename_asset", "create_asset", "tweak_material_parameter"],
+            "summary": "Normalize safe preview and apply requests so the plugin can confirm and execute the right editor mutation.",
         },
         {
             "name": "compile_project_and_surface_errors",

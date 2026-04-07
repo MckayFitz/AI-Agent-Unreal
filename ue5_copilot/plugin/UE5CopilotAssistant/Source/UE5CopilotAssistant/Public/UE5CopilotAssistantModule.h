@@ -49,6 +49,10 @@ private:
     TSharedPtr<class SEditableTextBox> ScaffoldNameTextBoxPtr;
     TSharedPtr<class SEditableTextBox> ScaffoldPurposeTextBoxPtr;
     TSharedPtr<class SEditableTextBox> ScaffoldClassNameTextBoxPtr;
+    TSharedPtr<class SEditableTextBox> NativeClassNameTextBoxPtr;
+    TSharedPtr<class SEditableTextBox> NativeParentClassTextBoxPtr;
+    TSharedPtr<class SEditableTextBox> NativeModuleNameTextBoxPtr;
+    TSharedPtr<class SEditableTextBox> NativePluginNameTextBoxPtr;
     TSharedPtr<class SEditableTextBox> CodePatchTargetPathTextBoxPtr;
     TSharedPtr<class SEditableTextBox> BundleApplyTargetPathTextBoxPtr;
     TSharedPtr<SComboBox<TSharedPtr<FString>>> BundleApplyTargetComboBoxPtr;

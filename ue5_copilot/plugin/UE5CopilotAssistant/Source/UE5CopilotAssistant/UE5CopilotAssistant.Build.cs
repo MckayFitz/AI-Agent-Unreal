@@ -21,17 +21,22 @@ public class UE5CopilotAssistant : ModuleRules
             new[]
             {
                 "ApplicationCore",
+                "AIModule",
                 "AssetRegistry",
                 "AssetTools",
                 "ContentBrowser",
                 "EnhancedInput",
                 "EditorStyle",
+                "GameProjectGeneration",
                 "HTTP",
                 "InputCore",
                 "Json",
                 "JsonUtilities",
                 "MaterialEditor",
+                "Niagara",
                 "Projects",
+                "StateTreeEditorModule",
+                "StateTreeModule",
                 "ToolMenus",
                 "UnrealEd",
                 "WorkspaceMenuStructure"

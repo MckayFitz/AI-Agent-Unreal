@@ -72,7 +72,10 @@ What that means in practice:
 What the plugin does not do yet:
 - It does not execute general asset mutations yet.
 - It only applies a narrow set of editor actions today: `rename_asset`, Blueprint-class `create_asset`, `data_asset` `create_asset`, `input_action` `create_asset`, `input_mapping_context` `create_asset`, `material_instance` `create_asset`, previewed small-bundle `.h` and `.cpp` code patch actions, and narrow `tweak_material_parameter` updates for selected Material Instances. Those parameter tweaks currently support scalar, vector, and texture values when the backend can infer a concrete value. Other backend-proposed editor actions are still preview-only.
-- Deep asset analysis is still best when you paste/export graph or state text; when you do not, the plugin now falls back to reflected selected-asset properties instead of sending an empty request.
+- It now also applies `create_cpp_class` actions through Unreal's native project-generation pipeline when the backend returns a confirmation-gated native class scaffold.
+- It now also applies `create_plugin` actions by scaffolding a new project plugin under the current Unreal project's `Plugins/` folder and handing it off to Unreal's plugin manager.
+- It now also applies `create_module` actions for existing project plugins by generating module source files and updating the plugin descriptor through Unreal editor APIs.
+- Deep asset analysis is still best when you paste/export graph or state text; when you do not, the plugin now extracts direct Blueprint graph/variable summaries, direct Behavior Tree structure, direct Niagara system/emitter summaries, and direct State Tree hierarchy/task/transition summaries when possible, then falls back to reflected selected-asset properties instead of sending an empty request.
 - Most editor action previews are informational only right now and do not validate or apply anything yet.
 
 Current execution status:
@@ -82,6 +85,9 @@ Current execution status:
   Those code patch applies refuse to run if any target file changed after the diff bundle was drafted.
   You can also apply one file from a previewed bundle at a time by choosing it from the pending bundle file picker or replacing the path manually.
 - It now includes a confirmation-and-apply path for narrow Material Instance scalar/vector parameter tweaks when the backend can infer a concrete value.
+- It now includes a confirmation-and-apply path for native `create_cpp_class` actions routed through Unreal's project-generation APIs.
+- It now includes a confirmation-and-apply path for `create_plugin` actions that scaffold a new project plugin and try to register it immediately with Unreal.
+- It now includes a confirmation-and-apply path for `create_module` actions inside existing project plugins.
 - Other `editor_action` types are still preview-only until dedicated validation and execution handlers are added.
 
 The intended next step is a dry-run and confirmation flow where the backend can suggest an `editor_action`, and the plugin validates and executes it through Unreal editor APIs.

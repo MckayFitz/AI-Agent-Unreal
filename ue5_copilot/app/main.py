@@ -496,6 +496,30 @@ def agent_session_execution_state_post(task_id: str):
     }
 
 
+@app.get("/agent-session/{task_id}/execution-report")
+def agent_session_execution_report(task_id: str):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+    return {
+        "task_id": task_id,
+        "status": session.get("status"),
+        "execution_report": (session.get("orchestration") or {}).get("execution_report", {}),
+    }
+
+
+@app.post("/agent-session/{task_id}/execution-report")
+def agent_session_execution_report_post(task_id: str):
+    session = AGENT_TASK_CACHE.get(task_id)
+    if not session:
+        return {"error": "That agent task session was not found."}
+    return {
+        "task_id": task_id,
+        "status": session.get("status"),
+        "execution_report": (session.get("orchestration") or {}).get("execution_report", {}),
+    }
+
+
 @app.get("/agent-session/{task_id}/events")
 def agent_session_events(task_id: str, after: int = -1):
     session = AGENT_TASK_CACHE.get(task_id)
@@ -1297,6 +1321,7 @@ def build_agent_session_event_feed(*, task_id: str, session: dict, after: int = 
         "next_cursor": next_cursor,
         "has_more": False,
         "execution_state": (session.get("orchestration") or {}).get("execution_state", {}),
+        "execution_report": (session.get("orchestration") or {}).get("execution_report", {}),
     }
 
 

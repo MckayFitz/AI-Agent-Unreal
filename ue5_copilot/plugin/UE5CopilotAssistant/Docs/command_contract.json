@@ -45,7 +45,7 @@
       "direction": "plugin_to_backend",
       "description": "Dispatch a concrete Unreal-oriented tool request through one normalized backend route.",
       "payload_schema": {
-        "tool_name": "tool_catalog|read_current_selection|open_asset_in_editor|inspect_asset_metadata|extract_blueprint_graph_state|search_project_symbols|scan_project_context|plan_asset_creation|plan_asset_edits|plan_code_changes|compile_project_and_surface_errors|report_compile_result|start_agent_session",
+        "tool_name": "tool_catalog|read_current_selection|open_asset_in_editor|inspect_asset_metadata|extract_blueprint_graph_state|search_project_symbols|search_project_references|scan_project_context|plan_asset_creation|plan_asset_edits|plan_code_changes|create_cpp_class|create_plugin|create_module|rename_selected_asset|apply_safe_editor_edits|compile_project_and_surface_errors|report_compile_result|start_agent_session",
         "selection_name": "string",
         "selection_type": "string",
         "asset_path": "string",
@@ -145,6 +145,11 @@
         "arguments": {
           "asset_path": "string",
           "new_name": "string",
+          "class_name": "string",
+          "module_name": "string",
+          "plugin_name": "string",
+          "module_type": "string",
+          "loading_phase": "string",
           "asset_kind": "string",
           "asset_name": "string",
           "package_path": "string",

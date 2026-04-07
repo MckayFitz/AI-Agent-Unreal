@@ -376,6 +376,13 @@ class ApiContractTests(unittest.TestCase):
         self.assertTrue(payload["payload"]["orchestration_tools"])
         self.assertTrue(payload["payload"]["unreal_tool_catalog"])
         self.assertTrue(payload["payload"]["confirmation_policy"]["dry_run_before_apply"])
+        unreal_tool_names = [item["name"] for item in payload["payload"]["unreal_tool_catalog"]]
+        self.assertIn("create_cpp_class", unreal_tool_names)
+        self.assertIn("create_plugin", unreal_tool_names)
+        self.assertIn("create_module", unreal_tool_names)
+        self.assertIn("rename_selected_asset", unreal_tool_names)
+        self.assertIn("search_project_references", unreal_tool_names)
+        self.assertIn("apply_safe_editor_edits", unreal_tool_names)
 
     def test_plugin_tool_read_current_selection_routes_through_normalized_dispatch(self):
         response = self.client.post(
@@ -421,6 +428,76 @@ class ApiContractTests(unittest.TestCase):
             payload["editor_action"]["arguments"]["asset_path"],
             "Content/Blueprints/BP_PlayerCharacter.uasset",
         )
+
+    def test_plugin_tool_create_cpp_class_returns_confirmation_gated_action(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "create_cpp_class",
+                "project_path": "C:/Project",
+                "tool_args": {
+                    "class_name": "SprintComponent",
+                    "parent_class": "UActorComponent",
+                    "module_name": "MyGame",
+                },
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "create_cpp_class")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["editor_action"]["action_type"], "create_cpp_class")
+        self.assertTrue(payload["editor_action"]["requires_user_confirmation"])
+        self.assertEqual(payload["editor_action"]["arguments"]["class_name"], "SprintComponent")
+        self.assertEqual(payload["editor_action"]["arguments"]["parent_class"], "UActorComponent")
+
+    def test_plugin_tool_rename_selected_asset_returns_confirmation_gated_action(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "rename_selected_asset",
+                "selection_name": "BP_PlayerCharacter",
+                "asset_path": "Content/Blueprints/BP_PlayerCharacter.uasset",
+                "tool_args": {"new_name": "BP_PlayerHero"},
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "rename_selected_asset")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["editor_action"]["action_type"], "rename_asset")
+        self.assertTrue(payload["editor_action"]["requires_user_confirmation"])
+        self.assertEqual(payload["editor_action"]["arguments"]["new_name"], "BP_PlayerHero")
+
+    def test_plugin_tool_apply_safe_editor_edits_wraps_preview_bundle(self):
+        response = self.client.post(
+            "/plugin/tool",
+            json={
+                "tool_name": "apply_safe_editor_edits",
+                "tool_args": {
+                    "goal": "add sprint input and hook it to the player character",
+                    "files": [
+                        {
+                            "path": "Source/MyGame/Public/Player/MyPlayerCharacter.h",
+                            "updated_content": "class AMyPlayerCharacter {};",
+                        }
+                    ],
+                },
+                "source": "ue5_plugin",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        self.assertEqual(payload["tool_name"], "apply_safe_editor_edits")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["editor_action"]["action_type"], "apply_code_patch_bundle_preview")
+        self.assertTrue(payload["editor_action"]["requires_user_confirmation"])
+        self.assertTrue(payload["editor_action"]["dry_run"])
 
     def test_plugin_tool_compile_project_returns_compile_action(self):
         response = self.client.post(
@@ -670,8 +747,34 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(payload["orchestration"]["execution_trace"][0]["tool_name"], "inspect_project_context")
         self.assertEqual(payload["orchestration"]["proposed_plan"][7]["tool_name"], "request_confirmation")
         self.assertEqual(payload["orchestration"]["ranked_candidates"][0]["tool_name"], "confirm_agent_step")
+        self.assertEqual(payload["orchestration"]["execution_report"]["tooling"]["next_tool"], "confirm_agent_step")
+        self.assertTrue(payload["orchestration"]["execution_report"]["confirmation"]["awaiting_confirmation"])
+        self.assertEqual(payload["orchestration"]["execution_report"]["handoff"]["execution_state"]["current_stage"], "awaiting_confirmation")
         self.assertEqual(payload["context"]["file_contexts"][0]["path"], "Source/MyGame/Public/Player/MyPlayerCharacter.h")
         self.assertEqual(payload["last_tool_result"]["tool_name"], "request_confirmation")
+
+    def test_agent_session_execution_report_endpoint_returns_context_and_next_action(self):
+        create_response = self.client.post(
+            "/agent-session",
+            json={"goal": "add sprint input and hook it to the player character"},
+        )
+        self.assertEqual(create_response.status_code, 200)
+        task_id = create_response.json()["task_id"]
+
+        report_response = self.client.get(f"/agent-session/{task_id}/execution-report")
+        self.assertEqual(report_response.status_code, 200)
+        payload = report_response.json()
+
+        self.assertEqual(payload["task_id"], task_id)
+        self.assertEqual(payload["status"], "awaiting_confirmation")
+        self.assertEqual(payload["execution_report"]["task_type"], "hybrid_feature")
+        self.assertEqual(payload["execution_report"]["tooling"]["next_tool"], "confirm_agent_step")
+        self.assertTrue(payload["execution_report"]["project_context"]["candidate_files"])
+        self.assertTrue(payload["execution_report"]["confirmation"]["pending_target_paths"])
+        self.assertEqual(
+            payload["execution_report"]["handoff"]["execution_state"]["next_required_action"],
+            "confirm_agent_step",
+        )
 
     def test_agent_tools_endpoint_returns_orchestration_and_unreal_catalogs(self):
         response = self.client.get("/agent-tools")
@@ -685,6 +788,14 @@ class ApiContractTests(unittest.TestCase):
         self.assertTrue(payload["confirmation_policy"]["resume_after_approval"])
         self.assertIn(
             "plan_code_changes",
+            [item["name"] for item in payload["unreal_tool_catalog"]],
+        )
+        self.assertIn(
+            "create_cpp_class",
+            [item["name"] for item in payload["unreal_tool_catalog"]],
+        )
+        self.assertIn(
+            "search_project_references",
             [item["name"] for item in payload["unreal_tool_catalog"]],
         )
         self.assertIn(

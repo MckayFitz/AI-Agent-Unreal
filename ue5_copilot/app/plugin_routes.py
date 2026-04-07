@@ -621,6 +621,7 @@ Relevant project files:
             "pending_confirmation": session.get("pending_confirmation"),
             "approved_editor_action": session.get("approved_editor_action"),
             "result": session.get("result"),
+            "execution_report": (session.get("orchestration") or {}).get("execution_report", {}),
             "session": session,
         }
 
@@ -755,6 +756,123 @@ Relevant project files:
                 tool_name=tool_name,
                 status="ok",
                 message=f"Prepared an editor action to open `{selection_name or asset_path}`.",
+                payload=payload,
+                editor_action=editor_action,
+            )
+
+        if tool_name == "create_cpp_class":
+            class_name_arg = str(tool_args.get("class_name") or selection_name).strip()
+            parent_class = str(tool_args.get("parent_class", "UObject")).strip() or "UObject"
+            target_module = str(tool_args.get("module_name", "")).strip()
+            if not class_name_arg:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Creating a C++ class requires a class_name.",
+                )
+            payload = {
+                "class_name": class_name_arg,
+                "parent_class": parent_class,
+                "module_name": target_module,
+                "project_path": request.project_path or deps["project_cache"].get("project_path"),
+            }
+            editor_action = {
+                "action_type": "create_cpp_class",
+                "dry_run": False,
+                "requires_user_confirmation": True,
+                "arguments": payload,
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=f"Prepared a C++ class creation action for `{class_name_arg}`.",
+                payload=payload,
+                editor_action=editor_action,
+            )
+
+        if tool_name == "create_plugin":
+            plugin_name = str(tool_args.get("plugin_name") or selection_name).strip()
+            if not plugin_name:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Creating a plugin requires a plugin_name.",
+                )
+            payload = {
+                "plugin_name": plugin_name,
+                "template": str(tool_args.get("template", "Blank")).strip() or "Blank",
+                "module_name": str(tool_args.get("module_name", plugin_name)).strip() or plugin_name,
+                "project_path": request.project_path or deps["project_cache"].get("project_path"),
+            }
+            editor_action = {
+                "action_type": "create_plugin",
+                "dry_run": False,
+                "requires_user_confirmation": True,
+                "arguments": payload,
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=f"Prepared a plugin creation action for `{plugin_name}`.",
+                payload=payload,
+                editor_action=editor_action,
+            )
+
+        if tool_name == "create_module":
+            module_name = str(tool_args.get("module_name") or selection_name).strip()
+            if not module_name:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Creating a module requires a module_name.",
+                )
+            payload = {
+                "module_name": module_name,
+                "module_type": str(tool_args.get("module_type", "Runtime")).strip() or "Runtime",
+                "loading_phase": str(tool_args.get("loading_phase", "Default")).strip() or "Default",
+                "plugin_name": str(tool_args.get("plugin_name", "")).strip(),
+                "project_path": request.project_path or deps["project_cache"].get("project_path"),
+            }
+            editor_action = {
+                "action_type": "create_module",
+                "dry_run": False,
+                "requires_user_confirmation": True,
+                "arguments": payload,
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=f"Prepared a module creation action for `{module_name}`.",
+                payload=payload,
+                editor_action=editor_action,
+            )
+
+        if tool_name == "rename_selected_asset":
+            new_name = str(tool_args.get("new_name", "")).strip()
+            if not asset_path or not new_name:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Renaming an asset requires both asset_path and new_name.",
+                )
+            payload = {
+                "selection_name": selection_name,
+                "asset_path": asset_path,
+                "new_name": new_name,
+            }
+            editor_action = {
+                "action_type": "rename_asset",
+                "dry_run": False,
+                "requires_user_confirmation": True,
+                "arguments": {
+                    "asset_path": asset_path,
+                    "new_name": new_name,
+                },
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=f"Prepared a rename action for `{selection_name or asset_path}`.",
                 payload=payload,
                 editor_action=editor_action,
             )
@@ -937,6 +1055,31 @@ Relevant project files:
                 payload=payload,
             )
 
+        if tool_name == "search_project_references":
+            query = str(tool_args.get("query") or tool_args.get("symbol") or asset_path or selection_name or class_name).strip()
+            if not query:
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="error",
+                    message="Provide a symbol, asset path, or query first.",
+                )
+            reference_payload = deps["find_references"](analysis["files"], query)
+            asset_matches = [
+                asset for asset in deps["project_cache"]["assets"]
+                if query.lower() in asset["name"].lower() or query.lower() in asset["path"].lower()
+            ][:12]
+            payload = {
+                "query": query,
+                "references": reference_payload,
+                "asset_matches": asset_matches,
+            }
+            return make_tool_response(
+                tool_name=tool_name,
+                status="ok",
+                message=f"Searched project references for `{query}`.",
+                payload=payload,
+            )
+
         if tool_name == "scan_project_context":
             payload = {
                 "project_path": deps["project_cache"].get("project_path"),
@@ -967,6 +1110,41 @@ Relevant project files:
                 message=f"Prepared a scaffold plan for `{payload.get('recommended_asset_name', '')}`.",
                 payload=payload,
                 editor_action=payload.get("editor_action"),
+            )
+
+        if tool_name == "apply_safe_editor_edits":
+            preview_action = tool_args.get("editor_action")
+            if isinstance(preview_action, dict) and preview_action.get("action_type"):
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="ok",
+                    message="Prepared the provided editor action for confirmation-gated execution.",
+                    payload={"editor_action": preview_action},
+                    editor_action=preview_action,
+                )
+
+            if tool_args.get("goal") and tool_args.get("files"):
+                editor_action = {
+                    "action_type": "apply_code_patch_bundle_preview",
+                    "dry_run": True,
+                    "requires_user_confirmation": True,
+                    "arguments": {
+                        "goal": str(tool_args.get("goal", "")).strip(),
+                        "files": tool_args.get("files"),
+                    },
+                }
+                return make_tool_response(
+                    tool_name=tool_name,
+                    status="ok",
+                    message="Prepared a code patch preview for confirmation-gated editor apply.",
+                    payload={"goal": tool_args.get("goal"), "files": tool_args.get("files")},
+                    editor_action=editor_action,
+                )
+
+            return make_tool_response(
+                tool_name=tool_name,
+                status="error",
+                message="Applying safe editor edits requires an editor_action or previewable file bundle.",
             )
 
         if tool_name == "plan_asset_edits":
